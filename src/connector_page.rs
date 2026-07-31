@@ -5,15 +5,15 @@ use iced::{
 
 #[derive(Debug, Default)]
 pub struct ConnectorPage {
-    api_key: String,
-    api_secret: String,
-    api_url: String,
-    username: String,
-    room_id: String,
+    pub api_key: String,
+    pub api_secret: String,
+    pub api_url: String,
+    pub username: String,
+    pub room_id: String,
 }
 
 #[derive(Debug, Clone)]
-pub enum Message {
+pub enum ConnectorPageMessage {
     APIKeyContentChanged(String),
     APISecretContentChanged(String),
     APIURLContentChanged(String),
@@ -22,29 +22,38 @@ pub enum Message {
     ConnectButtonPressed,
 }
 
+#[derive(Debug, Clone)]
+pub enum ConnectorPageAction {
+    Connect,
+    None,
+}
+
 impl ConnectorPage {
-    pub fn view(&self) -> Element<'_, Message> {
+    pub fn view(&self) -> Element<'_, ConnectorPageMessage> {
         column![
             row![
                 column![
-                    text_input("Api Key", &self.api_key).on_input(Message::APIKeyContentChanged),
+                    text_input("Api Key", &self.api_key)
+                        .on_input(ConnectorPageMessage::APIKeyContentChanged),
                     text_input("Api Secret", &self.api_secret)
-                        .on_input(Message::APISecretContentChanged)
+                        .on_input(ConnectorPageMessage::APISecretContentChanged)
                         .secure(true),
-                    text_input("Api URL", &self.api_url).on_input(Message::APIURLContentChanged),
+                    text_input("Api URL", &self.api_url)
+                        .on_input(ConnectorPageMessage::APIURLContentChanged),
                 ]
                 .spacing(10)
                 .padding(20),
                 column![
                     text_input("Username", &self.username)
-                        .on_input(Message::UsernameContentChanged),
-                    text_input("Room ID", &self.room_id).on_input(Message::RoomIDContentChanged),
+                        .on_input(ConnectorPageMessage::UsernameContentChanged),
+                    text_input("Room ID", &self.room_id)
+                        .on_input(ConnectorPageMessage::RoomIDContentChanged),
                 ]
                 .spacing(10)
                 .padding(20),
             ]
             .spacing(10),
-            container(button("Connect").on_press(Message::ConnectButtonPressed))
+            container(button("Connect").on_press(ConnectorPageMessage::ConnectButtonPressed))
                 .padding(20)
                 .height(Length::Fill)
                 .width(Length::Fill)
@@ -53,16 +62,18 @@ impl ConnectorPage {
         .into()
     }
 
-    pub fn update(&mut self, message: Message) {
+    pub fn update(&mut self, message: ConnectorPageMessage) -> ConnectorPageAction {
         match message {
-            Message::APIKeyContentChanged(value) => self.api_key = value,
-            Message::APISecretContentChanged(value) => self.api_secret = value,
-            Message::APIURLContentChanged(value) => self.api_url = value,
-            Message::UsernameContentChanged(value) => self.username = value,
-            Message::RoomIDContentChanged(value) => self.room_id = value,
-            Message::ConnectButtonPressed => {
-                println!("Connect button pressed");
+            ConnectorPageMessage::APIKeyContentChanged(value) => self.api_key = value,
+            ConnectorPageMessage::APISecretContentChanged(value) => self.api_secret = value,
+            ConnectorPageMessage::APIURLContentChanged(value) => self.api_url = value,
+            ConnectorPageMessage::UsernameContentChanged(value) => self.username = value,
+            ConnectorPageMessage::RoomIDContentChanged(value) => self.room_id = value,
+            ConnectorPageMessage::ConnectButtonPressed => {
+                return ConnectorPageAction::Connect;
             }
         }
+
+        ConnectorPageAction::None
     }
 }
