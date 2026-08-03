@@ -3,6 +3,8 @@ use iced::{
     widget::{button, column, container, row, text_input},
 };
 
+use crate::common::ApiKey;
+
 #[derive(Debug, Default)]
 pub struct ConnectorPage {
     pub api_key: String,
@@ -24,7 +26,7 @@ pub enum ConnectorPageMessage {
 
 #[derive(Debug, Clone)]
 pub enum ConnectorPageAction {
-    Connect,
+    Connect(ApiKey),
     None,
 }
 
@@ -70,7 +72,12 @@ impl ConnectorPage {
             ConnectorPageMessage::UsernameContentChanged(value) => self.username = value,
             ConnectorPageMessage::RoomIDContentChanged(value) => self.room_id = value,
             ConnectorPageMessage::ConnectButtonPressed => {
-                return ConnectorPageAction::Connect;
+                return ConnectorPageAction::Connect(ApiKey {
+                    api_key: self.api_key.clone(),
+                    api_secret: self.api_secret.clone(),
+                    identity: self.username.clone(),
+                    room: self.room_id.clone(),
+                });
             }
         }
 

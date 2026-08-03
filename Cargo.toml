@@ -5,6 +5,10 @@ edition = "2024"
 
 [dependencies]
 iced = { version = "0.14.0", features = ["canvas"] }
+livekit = "0.8.1"
+livekit-api = "0.6.1"
+serde = "1.0.229"
+tokio = "1.53.1"
 
 # https://www.namtao.com/rust/
 [lints.clippy]
