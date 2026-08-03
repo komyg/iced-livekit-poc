@@ -31,6 +31,17 @@ pub enum ConnectorPageAction {
 }
 
 impl ConnectorPage {
+    pub fn default() -> Self {
+        let api_key = ApiKey::from_env();
+        Self {
+            api_key: api_key.api_key,
+            api_secret: api_key.api_secret,
+            api_url: api_key.api_url,
+            username: api_key.identity,
+            room_id: api_key.room,
+        }
+    }
+
     pub fn view(&self) -> Element<'_, ConnectorPageMessage> {
         column![
             row![
@@ -75,6 +86,7 @@ impl ConnectorPage {
                 return ConnectorPageAction::Connect(ApiKey {
                     api_key: self.api_key.clone(),
                     api_secret: self.api_secret.clone(),
+                    api_url: self.api_url.clone(),
                     identity: self.username.clone(),
                     room: self.room_id.clone(),
                 });

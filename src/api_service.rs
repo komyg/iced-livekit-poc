@@ -6,6 +6,7 @@ pub fn get_access_token(auth_data: &ApiKey) -> Result<String, String> {
     let ApiKey {
         api_key,
         api_secret,
+        api_url: _,
         identity,
         room,
     } = auth_data;
