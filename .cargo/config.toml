@@ -1,0 +1,15 @@
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# libwebrtc ships Objective-C categories (e.g. NSString+StdString's
+# +stringForAbslStringView:). The linker drops those object files unless
+# told to keep every ObjC section, which crashes at runtime with
+# "unrecognized selector sent to class" when WebRTC builds its codec list.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-ObjC"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-ObjC"]
