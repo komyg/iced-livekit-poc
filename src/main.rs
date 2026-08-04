@@ -1,29 +1,29 @@
 mod api_service;
 mod common;
-mod connector_page;
+mod pages;
 
-use connector_page::ConnectorPage;
 use iced::{Element, Task};
+use pages::login::LoginPage;
 
-use crate::connector_page::{ConnectorPageAction, ConnectorPageMessage};
+use crate::pages::login::{LoginPageAction, LoginPageMessage};
 
 #[derive(Debug, Clone)]
 enum Message {
-    Connector(ConnectorPageMessage),
+    Login(LoginPageMessage),
     Connected(Result<(), String>),
 }
 
-fn update(page: &mut ConnectorPage, message: Message) -> Task<Message> {
+fn update(page: &mut LoginPage, message: Message) -> Task<Message> {
     match message {
-        Message::Connector(message) => match page.update(message) {
-            ConnectorPageAction::Connect(api_key) => Task::perform(
+        Message::Login(message) => match page.update(message) {
+            LoginPageAction::Connect(api_key) => Task::perform(
                 async move {
                     let token = api_service::get_access_token(&api_key)?;
                     api_service::connect_to_room(token, api_key.api_url).await
                 },
                 Message::Connected,
             ),
-            ConnectorPageAction::None => Task::none(),
+            LoginPageAction::None => Task::none(),
         },
         Message::Connected(result) => {
             println!("Connected to room: {result:?}");
@@ -32,12 +32,12 @@ fn update(page: &mut ConnectorPage, message: Message) -> Task<Message> {
     }
 }
 
-fn view(page: &ConnectorPage) -> Element<'_, Message> {
-    page.view().map(Message::Connector)
+fn view(page: &LoginPage) -> Element<'_, Message> {
+    page.view().map(Message::Login)
 }
 
 pub fn main() -> iced::Result {
-    iced::application(ConnectorPage::default, update, view)
+    iced::application(LoginPage::default, update, view)
         .title("PV Meet Connector")
         .run()
 }
