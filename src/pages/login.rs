@@ -2,6 +2,7 @@ use iced::{
     Element, Length,
     widget::{button, column, container, row, text_input},
 };
+use livekit_api::access_token::{AccessToken, VideoGrants};
 
 use crate::common::ApiKey;
 
@@ -26,7 +27,8 @@ pub enum LoginPageMessage {
 
 #[derive(Debug, Clone)]
 pub enum LoginPageAction {
-    Connect(ApiKey),
+    Connect { token: String, api_url: String },
+    Failed(String),
     None,
 }
 
@@ -83,16 +85,44 @@ impl LoginPage {
             LoginPageMessage::UsernameContentChanged(value) => self.username = value,
             LoginPageMessage::RoomIDContentChanged(value) => self.room_id = value,
             LoginPageMessage::ConnectButtonPressed => {
-                return LoginPageAction::Connect(ApiKey {
+                let auth_data = ApiKey {
                     api_key: self.api_key.clone(),
                     api_secret: self.api_secret.clone(),
                     api_url: self.api_url.clone(),
                     identity: self.username.clone(),
                     room: self.room_id.clone(),
-                });
+                };
+
+                return match get_access_token(&auth_data) {
+                    Ok(token) => LoginPageAction::Connect {
+                        token,
+                        api_url: auth_data.api_url,
+                    },
+                    Err(error) => LoginPageAction::Failed(error),
+                };
             }
         }
 
         LoginPageAction::None
     }
+}
+
+fn get_access_token(auth_data: &ApiKey) -> Result<String, String> {
+    let ApiKey {
+        api_key,
+        api_secret,
+        api_url: _,
+        identity,
+        room,
+    } = auth_data;
+    AccessToken::with_api_key(&api_key, &api_secret)
+        .with_identity(&identity)
+        .with_name(&identity)
+        .with_grants(VideoGrants {
+            room_join: true,
+            room: room.clone(),
+            ..Default::default()
+        })
+        .to_jwt()
+        .map_err(|e| e.to_string())
 }

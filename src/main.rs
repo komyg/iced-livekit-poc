@@ -16,13 +16,14 @@ enum Message {
 fn update(page: &mut LoginPage, message: Message) -> Task<Message> {
     match message {
         Message::Login(message) => match page.update(message) {
-            LoginPageAction::Connect(api_key) => Task::perform(
-                async move {
-                    let token = api_service::get_access_token(&api_key)?;
-                    api_service::connect_to_room(token, api_key.api_url).await
-                },
+            LoginPageAction::Connect { token, api_url } => Task::perform(
+                async move { api_service::connect_to_room(token, api_url).await },
                 Message::Connected,
             ),
+            LoginPageAction::Failed(error) => {
+                eprintln!("Failed to create access token: {error}");
+                Task::none()
+            }
             LoginPageAction::None => Task::none(),
         },
         Message::Connected(result) => {
