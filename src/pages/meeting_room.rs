@@ -1,5 +1,5 @@
 use iced::{
-    Element,
+    Element, Task,
     widget::{column, text},
 };
 use livekit::{Room, RoomEvent, RoomOptions};
@@ -21,31 +21,44 @@ pub struct MeetingRoomPage {
     error: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+// #[derive(Debug, Clone)]
 pub enum MeetingRoomMessage {
-    None,
-}
-
-pub enum MeetingRoomAction {
-    None,
+    Mounted(String, String),
+    Connected(Result<(Room, UnboundedReceiver<RoomEvent>), String>),
 }
 
 impl MeetingRoomPage {
-    pub fn default(token: String, url: String) -> Self {
-        Self {
-            room: None,
-            events: None,
-            error: None,
-        }
+    pub fn new(token: String, url: String) -> (Self, MeetingRoomMessage) {
+        (
+            Self {
+                room: None,
+                events: None,
+                error: None,
+            },
+            MeetingRoomMessage::Mounted(token, url),
+        )
     }
 
     pub fn view(&self) -> Element<'_, MeetingRoomMessage> {
         column![text("Meeting Room"),].into()
     }
 
-    pub fn update(&mut self, message: MeetingRoomMessage) -> MeetingRoomAction {
+    pub fn update(&mut self, message: MeetingRoomMessage) -> Task<MeetingRoomMessage> {
         match message {
-            MeetingRoomMessage::None => MeetingRoomAction::None,
+            MeetingRoomMessage::Mounted(token, url) => {
+                Task::perform(connect_to_room(token, url), MeetingRoomMessage::Connected)
+            }
+            MeetingRoomMessage::Connected(result) => match result {
+                Ok((room, events)) => {
+                    self.room = Some(room);
+                    self.events = Some(events);
+                    Task::none()
+                }
+                Err(error) => {
+                    self.error = Some(error);
+                    Task::none()
+                }
+            },
         }
     }
 }

@@ -6,7 +6,7 @@ use pages::login::LoginPage;
 use pages::meeting_room::MeetingRoomPage;
 
 use crate::pages::login::{LoginPageAction, LoginPageMessage};
-use crate::pages::meeting_room::{MeetingRoomAction, MeetingRoomMessage};
+use crate::pages::meeting_room::MeetingRoomMessage;
 
 enum Screen {
     Login(LoginPage),
@@ -19,7 +19,6 @@ impl Screen {
     }
 }
 
-#[derive(Debug, Clone)]
 enum Message {
     Login(LoginPageMessage),
     MeetingRoom(MeetingRoomMessage),
@@ -34,8 +33,9 @@ fn update(screen: &mut Screen, message: Message) -> Task<Message> {
 
             match page.update(message) {
                 LoginPageAction::Login { token, api_url } => {
-                    *screen = Screen::MeetingRoom(MeetingRoomPage::default(token, api_url));
-                    Task::none()
+                    let (page, message) = MeetingRoomPage::new(token, api_url);
+                    *screen = Screen::MeetingRoom(page);
+                    Task::done(Message::MeetingRoom(message))
                 }
                 LoginPageAction::None => Task::none(),
             }
@@ -45,9 +45,7 @@ fn update(screen: &mut Screen, message: Message) -> Task<Message> {
                 return Task::none();
             };
 
-            match page.update(message) {
-                MeetingRoomAction::None => Task::none(),
-            }
+            page.update(message).map(Message::MeetingRoom)
         }
     }
 }
