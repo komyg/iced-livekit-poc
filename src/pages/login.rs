@@ -1,6 +1,6 @@
 use iced::{
     Element, Length,
-    widget::{button, column, container, row, text_input},
+    widget::{button, column, container, row, text, text_input},
 };
 use livekit_api::access_token::{AccessToken, VideoGrants};
 
@@ -8,11 +8,12 @@ use crate::common::ApiKey;
 
 #[derive(Debug, Default)]
 pub struct LoginPage {
-    pub api_key: String,
-    pub api_secret: String,
-    pub api_url: String,
-    pub username: String,
-    pub room_id: String,
+    api_key: String,
+    api_secret: String,
+    api_url: String,
+    username: String,
+    room_id: String,
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -27,8 +28,7 @@ pub enum LoginPageMessage {
 
 #[derive(Debug, Clone)]
 pub enum LoginPageAction {
-    Connect { token: String, api_url: String },
-    Failed(String),
+    Login { token: String, api_url: String },
     None,
 }
 
@@ -41,6 +41,7 @@ impl LoginPage {
             api_url: api_key.api_url,
             username: api_key.identity,
             room_id: api_key.room,
+            error: None,
         }
     }
 
@@ -68,12 +69,20 @@ impl LoginPage {
                 .padding(20),
             ]
             .spacing(10),
+        ]
+        .extend(self.error.iter().map(|error| {
+            container(text(error).style(text::danger))
+                .padding([0, 20])
+                .width(Length::Fill)
+                .into()
+        }))
+        .push(
             container(button("Connect").on_press(LoginPageMessage::ConnectButtonPressed))
                 .padding(20)
                 .height(Length::Fill)
                 .width(Length::Fill)
                 .align_right(Length::Fill),
-        ]
+        )
         .into()
     }
 
@@ -94,11 +103,17 @@ impl LoginPage {
                 };
 
                 return match get_access_token(&auth_data) {
-                    Ok(token) => LoginPageAction::Connect {
-                        token,
-                        api_url: auth_data.api_url,
-                    },
-                    Err(error) => LoginPageAction::Failed(error),
+                    Ok(token) => {
+                        self.error = None;
+                        LoginPageAction::Login {
+                            token,
+                            api_url: auth_data.api_url,
+                        }
+                    }
+                    Err(error) => {
+                        self.error = Some(error);
+                        LoginPageAction::None
+                    }
                 };
             }
         }

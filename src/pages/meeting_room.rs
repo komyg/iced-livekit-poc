@@ -7,3 +7,7 @@ pub async fn connect_to_room(token: String, url: String) -> Result<(), String> {
     println!("Connected to room: {:#?}", res);
     Ok(())
 }
+
+pub struct MeetingRoom {
+    room: Room,
+}
