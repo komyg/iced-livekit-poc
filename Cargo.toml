@@ -4,12 +4,18 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bytemuck = { version = "1.25", features = ["derive"] }
 dotenvy = "0.15.7"
+env_logger = "0.11"
 iced = { version = "0.14.0", features = ["canvas", "tokio"] }
 livekit = { version = "0.8.1", features = ["rustls-tls-native-roots"] }
 livekit-api = "0.6.1"
 serde = "1.0.229"
 tokio = "1.53.1"
+
+[dev-dependencies]
+# Same version wgpu 27 uses, so the test validates what the GPU will see.
+naga = { version = "27.0.3", features = ["wgsl-in"] }
 
 # https://www.namtao.com/rust/
 [lints.clippy]

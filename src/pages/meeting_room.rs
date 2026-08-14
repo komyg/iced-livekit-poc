@@ -1,64 +1,191 @@
-use iced::{
-    Element, Task,
-    widget::{column, text},
-};
-use livekit::{Room, RoomEvent, RoomOptions};
-use tokio::sync::mpsc::UnboundedReceiver;
+use std::sync::Arc;
 
-pub async fn connect_to_room(
-    token: String,
-    url: String,
-) -> Result<(Room, UnboundedReceiver<RoomEvent>), String> {
-    let res = Room::connect(&url, &token, RoomOptions::default())
-        .await
-        .map_err(|e| e.to_string())?;
-    return Ok(res);
+use iced::futures::{FutureExt, SinkExt, Stream, StreamExt, select, stream::SelectAll};
+use iced::widget::{container, shader, text};
+use iced::{Element, Length, Subscription};
+use livekit::track::RemoteTrack;
+use livekit::webrtc::video_stream::native::NativeVideoStream;
+use livekit::{Room, RoomEvent, RoomOptions};
+
+use crate::video::{Frame, VideoProgram, to_i420};
+
+#[derive(Debug, Clone)]
+pub enum Status {
+    Connecting,
+    Live,
+    Reconnecting,
+    Ended(Option<String>),
+}
+
+impl Status {
+    fn label(&self) -> String {
+        match self {
+            Self::Connecting => "Connecting…".to_owned(),
+            Self::Live => "Waiting for someone to publish video…".to_owned(),
+            Self::Reconnecting => "Reconnecting…".to_owned(),
+            Self::Ended(None) => "Disconnected.".to_owned(),
+            Self::Ended(Some(error)) => error.clone(),
+        }
+    }
+
+    const fn is_error(&self) -> bool {
+        matches!(self, Self::Ended(Some(_)))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum MeetingRoomMessage {
+    Status(Status),
+    Frame(Frame),
 }
 
 pub struct MeetingRoomPage {
-    room: Option<Room>,
-    events: Option<UnboundedReceiver<RoomEvent>>,
-    error: Option<String>,
-}
-
-// #[derive(Debug, Clone)]
-pub enum MeetingRoomMessage {
-    Mounted(String, String),
-    Connected(Result<(Room, UnboundedReceiver<RoomEvent>), String>),
+    token: String,
+    url: String,
+    status: Status,
+    frame: Option<Frame>,
 }
 
 impl MeetingRoomPage {
-    pub fn new(token: String, url: String) -> (Self, MeetingRoomMessage) {
-        (
-            Self {
-                room: None,
-                events: None,
-                error: None,
-            },
-            MeetingRoomMessage::Mounted(token, url),
-        )
+    pub const fn new(token: String, url: String) -> Self {
+        Self {
+            token,
+            url,
+            status: Status::Connecting,
+            frame: None,
+        }
     }
 
     pub fn view(&self) -> Element<'_, MeetingRoomMessage> {
-        column![text("Meeting Room"),].into()
+        let content: Element<'_, MeetingRoomMessage> = match &self.frame {
+            Some(frame) if !self.status.is_error() => shader(VideoProgram::new(frame.clone()))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into(),
+            _ => {
+                let label = text(self.status.label());
+
+                if self.status.is_error() {
+                    label.style(text::danger).into()
+                } else {
+                    label.into()
+                }
+            }
+        };
+
+        container(content)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into()
     }
 
-    pub fn update(&mut self, message: MeetingRoomMessage) -> Task<MeetingRoomMessage> {
+    pub fn update(&mut self, message: MeetingRoomMessage) {
         match message {
-            MeetingRoomMessage::Mounted(token, url) => {
-                Task::perform(connect_to_room(token, url), MeetingRoomMessage::Connected)
-            }
-            MeetingRoomMessage::Connected(result) => match result {
-                Ok((room, events)) => {
-                    self.room = Some(room);
-                    self.events = Some(events);
-                    Task::none()
-                }
-                Err(error) => {
-                    self.error = Some(error);
-                    Task::none()
-                }
-            },
+            MeetingRoomMessage::Status(status) => self.status = status,
+            MeetingRoomMessage::Frame(frame) => self.frame = Some(frame),
         }
     }
+
+    /// Owns the room connection for as long as this page is on screen.
+    ///
+    /// Keeping the `Room` inside the stream rather than in page state gives it
+    /// exactly the right lifetime — dropping the subscription tears down the
+    /// room and every video stream together.
+    pub fn subscription(&self) -> Subscription<MeetingRoomMessage> {
+        Subscription::run_with((self.url.clone(), self.token.clone()), connect)
+    }
+}
+
+fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + use<> {
+    let (url, token) = data.clone();
+
+    // A small buffer plus LiveKit's own keep-newest frame queue means a slow UI
+    // drops stale frames at the source instead of accumulating latency.
+    iced::stream::channel(2, async move |mut output| {
+        let connection = Room::connect(&url, &token, RoomOptions::default()).await;
+
+        let (_room, mut events) = match connection {
+            Ok(connection) => connection,
+            Err(error) => {
+                let _ = output
+                    .send(MeetingRoomMessage::Status(Status::Ended(Some(
+                        error.to_string(),
+                    ))))
+                    .await;
+                return;
+            }
+        };
+
+        let _ = output.send(MeetingRoomMessage::Status(Status::Live)).await;
+
+        // `SelectAll` drops substreams that finish, and reports itself as
+        // terminated while empty — so `select!` skips the branch entirely
+        // rather than spinning on a stream that has already returned `None`.
+        let mut videos: SelectAll<NativeVideoStream> = SelectAll::new();
+        let mut frame_id: u64 = 0;
+
+        loop {
+            select! {
+                event = events.recv().fuse() => {
+                    let Some(event) = event else { break };
+
+                    match event {
+                        RoomEvent::TrackSubscribed {
+                            track: RemoteTrack::Video(track),
+                            ..
+                        } if videos.is_empty() => {
+                            videos.push(
+                                NativeVideoStream::new(track.rtc_track()),
+                            );
+                        }
+                        RoomEvent::Reconnecting => {
+                            let _ = output
+                                .send(MeetingRoomMessage::Status(
+                                    Status::Reconnecting,
+                                ))
+                                .await;
+                        }
+                        RoomEvent::Reconnected => {
+                            let _ = output
+                                .send(MeetingRoomMessage::Status(Status::Live))
+                                .await;
+                        }
+                        RoomEvent::Disconnected { reason } => {
+                            let _ = output
+                                .send(MeetingRoomMessage::Status(
+                                    Status::Ended(Some(format!("{reason:?}"))),
+                                ))
+                                .await;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                frame = videos.next() => {
+                    let Some(frame) = frame else { continue };
+
+                    let Some(buffer) = to_i420(&*frame.buffer) else {
+                        continue;
+                    };
+
+                    frame_id = frame_id.wrapping_add(1);
+
+                    let _ = output
+                        .send(MeetingRoomMessage::Frame(Frame::new(
+                            Arc::new(buffer),
+                            frame_id,
+                            frame.rotation,
+                        )))
+                        .await;
+                }
+                // Required: `select!` panics if every branch is terminated and
+                // this arm is missing.
+                complete => break,
+            }
+        }
+
+        let _ = output
+            .send(MeetingRoomMessage::Status(Status::Ended(None)))
+            .await;
+    })
 }
