@@ -4,10 +4,12 @@ use iced::futures::{FutureExt, SinkExt, Stream, StreamExt, select, stream::Selec
 use iced::widget::{container, shader, text};
 use iced::{Element, Length, Subscription};
 use livekit::track::RemoteTrack;
+use livekit::webrtc::audio_stream::native::NativeAudioStream;
 use livekit::webrtc::video_stream::native::NativeVideoStream;
 use livekit::{Room, RoomEvent, RoomOptions};
 
-use crate::video::{Frame, VideoProgram, to_i420};
+use crate::audio::AudioSink;
+use crate::video::{Frame, VideoSink, to_i420};
 
 #[derive(Debug, Clone)]
 pub enum Status {
@@ -58,7 +60,7 @@ impl MeetingRoomPage {
 
     pub fn view(&self) -> Element<'_, MeetingRoomMessage> {
         let content: Element<'_, MeetingRoomMessage> = match &self.frame {
-            Some(frame) if !self.status.is_error() => shader(VideoProgram::new(frame.clone()))
+            Some(frame) if !self.status.is_error() => shader(VideoSink::new(frame.clone()))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into(),
@@ -122,7 +124,13 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
         // terminated while empty — so `select!` skips the branch entirely
         // rather than spinning on a stream that has already returned `None`.
         let mut videos: SelectAll<NativeVideoStream> = SelectAll::new();
+        let mut audio: SelectAll<NativeAudioStream> = SelectAll::new();
         let mut frame_id: u64 = 0;
+
+        // The sink lives for the loop's lifetime and stops playback when dropped.
+        let mut audio_sink = AudioSink::new()
+            .inspect_err(|error| eprintln!("Audio disabled: {error}"))
+            .ok();
 
         loop {
             select! {
@@ -137,6 +145,24 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                             videos.push(
                                 NativeVideoStream::new(track.rtc_track()),
                             );
+                        }
+                        RoomEvent::TrackSubscribed {
+                            track: RemoteTrack::Audio(track),
+                            ..
+                        } if audio.is_empty() => {
+                            // Ask WebRTC to decode straight to the device's own
+                            // rate/channels so playback never has to resample.
+                            // No sink means no output device — skip decoding.
+                            if let Some(sink) = &audio_sink
+                                && let Ok(rate) = i32::try_from(sink.sample_rate)
+                            {
+                                let channels = i32::from(sink.channels);
+                                audio.push(NativeAudioStream::new(
+                                    track.rtc_track(),
+                                    rate,
+                                    channels,
+                                ));
+                            }
                         }
                         RoomEvent::Reconnecting => {
                             let _ = output
@@ -171,12 +197,18 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                     frame_id = frame_id.wrapping_add(1);
 
                     let _ = output
-                        .send(MeetingRoomMessage::Frame(Frame::new(
+                        .try_send(MeetingRoomMessage::Frame(Frame::new(
                             Arc::new(buffer),
                             frame_id,
                             frame.rotation,
-                        )))
-                        .await;
+                        )));
+                }
+                frame = audio.next() => {
+                    let Some(frame) = frame else { continue };
+
+                    if let Some(sink) = &mut audio_sink {
+                        sink.push(&frame);
+                    }
                 }
                 // Required: `select!` panics if every branch is terminated and
                 // this arm is missing.

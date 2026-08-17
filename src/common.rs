@@ -2,6 +2,7 @@ use dotenvy::dotenv;
 use std::env::var;
 
 #[derive(Debug, Clone, Default)]
+#[allow(clippy::struct_field_names)]
 pub struct ApiKey {
     pub api_key: String,
     pub api_secret: String,

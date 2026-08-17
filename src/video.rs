@@ -13,8 +13,7 @@ use iced::wgpu;
 use iced::widget::shader::{self, Primitive, Viewport};
 use iced::{Rectangle, mouse};
 use livekit::webrtc::video_frame::{
-    I420Buffer, VideoBuffer, VideoBufferType, VideoRotation,
-    native::VideoFrameBufferExt,
+    I420Buffer, VideoBuffer, VideoBufferType, VideoRotation, native::VideoFrameBufferExt,
 };
 
 use pipeline::VideoPipeline;
@@ -32,11 +31,7 @@ pub struct Frame {
 }
 
 impl Frame {
-    pub const fn new(
-        buffer: Arc<I420Buffer>,
-        id: u64,
-        rotation: VideoRotation,
-    ) -> Self {
+    pub const fn new(buffer: Arc<I420Buffer>, id: u64, rotation: VideoRotation) -> Self {
         Self {
             buffer,
             id,
@@ -54,27 +49,13 @@ impl Frame {
 /// cheap refcount bump.
 pub fn to_i420(buffer: &dyn VideoBuffer) -> Option<I420Buffer> {
     match buffer.buffer_type() {
-        VideoBufferType::I420 => {
-            buffer.as_i420().map(VideoFrameBufferExt::to_i420)
-        }
-        VideoBufferType::I420A => {
-            buffer.as_i420a().map(VideoFrameBufferExt::to_i420)
-        }
-        VideoBufferType::I422 => {
-            buffer.as_i422().map(VideoFrameBufferExt::to_i420)
-        }
-        VideoBufferType::I444 => {
-            buffer.as_i444().map(VideoFrameBufferExt::to_i420)
-        }
-        VideoBufferType::I010 => {
-            buffer.as_i010().map(VideoFrameBufferExt::to_i420)
-        }
-        VideoBufferType::NV12 => {
-            buffer.as_nv12().map(VideoFrameBufferExt::to_i420)
-        }
-        VideoBufferType::Native => {
-            buffer.as_native().map(VideoFrameBufferExt::to_i420)
-        }
+        VideoBufferType::I420 => buffer.as_i420().map(VideoFrameBufferExt::to_i420),
+        VideoBufferType::I420A => buffer.as_i420a().map(VideoFrameBufferExt::to_i420),
+        VideoBufferType::I422 => buffer.as_i422().map(VideoFrameBufferExt::to_i420),
+        VideoBufferType::I444 => buffer.as_i444().map(VideoFrameBufferExt::to_i420),
+        VideoBufferType::I010 => buffer.as_i010().map(VideoFrameBufferExt::to_i420),
+        VideoBufferType::NV12 => buffer.as_nv12().map(VideoFrameBufferExt::to_i420),
+        VideoBufferType::Native => buffer.as_native().map(VideoFrameBufferExt::to_i420),
         // `VideoBufferType` is #[non_exhaustive].
         _ => None,
     }
@@ -82,17 +63,17 @@ pub fn to_i420(buffer: &dyn VideoBuffer) -> Option<I420Buffer> {
 
 /// Draws a [`Frame`]. Emits no messages, so it is generic over `Message`.
 #[derive(Debug)]
-pub struct VideoProgram {
+pub struct VideoSink {
     frame: Frame,
 }
 
-impl VideoProgram {
+impl VideoSink {
     pub const fn new(frame: Frame) -> Self {
         Self { frame }
     }
 }
 
-impl<Message> shader::Program<Message> for VideoProgram {
+impl<Message> shader::Program<Message> for VideoSink {
     type State = ();
     type Primitive = VideoPrimitive;
 
@@ -141,21 +122,10 @@ impl Primitive for VideoPrimitive {
             return;
         }
 
-        pipeline.upload(
-            device,
-            queue,
-            &self.buffer,
-            self.id,
-            self.rotation,
-            *bounds,
-        );
+        pipeline.upload(device, queue, &self.buffer, self.id, self.rotation, *bounds);
     }
 
-    fn draw(
-        &self,
-        pipeline: &Self::Pipeline,
-        render_pass: &mut wgpu::RenderPass<'_>,
-    ) -> bool {
+    fn draw(&self, pipeline: &Self::Pipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
         // Returning true reuses iced's render pass, whose viewport and scissor
         // are already set to our bounds — so `render` is never called.
         pipeline.draw(render_pass)

@@ -1,3 +1,4 @@
+mod audio;
 mod common;
 mod pages;
 mod video;
@@ -16,7 +17,7 @@ enum Screen {
 
 impl Screen {
     fn new() -> Self {
-        Screen::Login(LoginPage::default())
+        Self::Login(LoginPage::default())
     }
 }
 
@@ -36,8 +37,7 @@ fn update(screen: &mut Screen, message: Message) {
                 LoginPageAction::Login { token, api_url } => {
                     // The meeting room's subscription drives the connection, so
                     // switching the screen is all it takes to start it.
-                    *screen =
-                        Screen::MeetingRoom(MeetingRoomPage::new(token, api_url));
+                    *screen = Screen::MeetingRoom(MeetingRoomPage::new(token, api_url));
                 }
                 LoginPageAction::None => {}
             }
@@ -62,9 +62,7 @@ fn view(screen: &Screen) -> Element<'_, Message> {
 fn subscription(screen: &Screen) -> Subscription<Message> {
     match screen {
         Screen::Login(_) => Subscription::none(),
-        Screen::MeetingRoom(page) => {
-            page.subscription().map(Message::MeetingRoom)
-        }
+        Screen::MeetingRoom(page) => page.subscription().map(Message::MeetingRoom),
     }
 }
 
