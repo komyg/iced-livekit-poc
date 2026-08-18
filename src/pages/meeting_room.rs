@@ -8,7 +8,7 @@ use livekit::webrtc::audio_stream::native::NativeAudioStream;
 use livekit::webrtc::video_stream::native::NativeVideoStream;
 use livekit::{Room, RoomEvent, RoomOptions};
 
-use crate::audio::AudioSink;
+use crate::audio::audio_sink::AudioSink;
 use crate::video::{Frame, VideoSink, to_i420};
 
 #[derive(Debug, Clone)]
