@@ -45,14 +45,22 @@ impl AudioSource {
         (self.sample_rate as usize / 100) * self.channels as usize
     }
 
-    /// Returns one 10 ms frame, or `None` if the mic hasn't filled one yet.
+    /// Fills `out` with one 10 ms frame. Returns `false` if the mic hasn't
+    /// buffered a whole frame yet, leaving `out` untouched.
     pub fn pop_frame(&mut self, out: &mut Vec<i16>) -> bool {
-        let n = self.frame_len();
-        if self.consumer.slots() < n {
+        // `read_chunk` fails unless all `frame_len` samples are readable, so a
+        // partial frame can never reach the caller.
+        let Ok(chunk) = self.consumer.read_chunk(self.frame_len()) else {
             return false;
-        }
+        };
+
+        // The ring may wrap mid-frame; `second` is empty when it doesn't.
+        let (first, second) = chunk.as_slices();
         out.clear();
-        out.extend((0..n).filter_map(|_| self.consumer.pop().ok()));
+        out.extend_from_slice(first);
+        out.extend_from_slice(second);
+
+        chunk.commit_all();
         true
     }
 }
