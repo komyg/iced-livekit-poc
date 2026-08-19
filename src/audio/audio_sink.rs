@@ -5,10 +5,6 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use livekit::webrtc::audio_frame::AudioFrame;
 use rtrb::{Producer, RingBuffer};
 
-/// Divisor that maps an `i16` sample (−32768..=32767) onto cpal's f32 range
-/// (−1.0..=1.0). It's 2^15 — the magnitude of `i16::MIN`.
-const I16_TO_F32_SCALE: f32 = 32768.0;
-
 pub struct AudioSink {
     producer: Producer<i16>,
     pub sample_rate: u32,
@@ -40,17 +36,16 @@ impl AudioSink {
             .map_err(|e| e.to_string())?;
 
         // Block until the thread reports its device format (or an error).
-        match init_rx.recv() {
-            Ok(Ok(init)) => Ok(Self {
-                producer: init.producer,
-                sample_rate: init.sample_rate,
-                channels: init.channels,
+        init_rx
+            .recv()
+            .map_err(|_| "Audio thread exited before init".to_string())?
+            .map(|audio_output| Self {
+                producer: audio_output.producer,
+                sample_rate: audio_output.sample_rate,
+                channels: audio_output.channels,
                 shutdown: Some(shutdown_tx),
                 handle: Some(handle),
-            }),
-            Ok(Err(error)) => Err(error),
-            Err(_) => Err("Audio thread exited before init".to_string()),
-        }
+            })
     }
 
     pub fn push(&mut self, frame: &AudioFrame) {
@@ -82,11 +77,11 @@ fn audio_output_thread(
     init_tx: &mpsc::Sender<Result<AudioOutput, String>>,
     shutdown: &mpsc::Receiver<()>,
 ) {
-    match build_stream() {
-        Ok((stream, init)) => {
+    match build_output_stream() {
+        Ok((stream, audio_output)) => {
             // If the receiver is already gone, the sink was dropped; bail before
             // holding a stream nobody can feed.
-            if init_tx.send(Ok(init)).is_err() {
+            if init_tx.send(Ok(audio_output)).is_err() {
                 return;
             }
             let _ = shutdown.recv(); // hold `stream` alive until the sink drops
@@ -98,33 +93,33 @@ fn audio_output_thread(
     }
 }
 
-fn build_stream() -> Result<(cpal::Stream, AudioOutput), String> {
+fn build_output_stream() -> Result<(cpal::Stream, AudioOutput), String> {
     let device = cpal::default_host()
         .default_output_device()
-        .ok_or_else(|| "No default output device".to_string())?;
-    let supported = device.default_output_config().map_err(|e| e.to_string())?;
+        .ok_or("No default output device".to_string())?;
+    let config = device.default_output_config().map_err(|e| e.to_string())?;
 
-    let sample_rate = supported.sample_rate();
-    let channels = supported.channels();
+    let sample_rate = config.sample_rate();
+    let channels = config.channels();
 
     // ~200 ms of interleaved samples.
     let slots = sample_rate
         .saturating_mul(u32::from(channels))
         .saturating_mul(200)
         .checked_div(1000)
-        .ok_or_else(|| "Overflow in audio buffer capacity calculation".to_string())?;
+        .ok_or("Overflow in audio output buffer capacity calculation".to_string())?;
     let capacity = usize::try_from(slots).map_err(|e| e.to_string())?;
     let (producer, mut consumer) = RingBuffer::<i16>::new(capacity);
 
     let stream = device
         .build_output_stream(
-            supported.config(),
+            config.config(),
             move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 // "For every slot the sound card asked for, pull one sample off the ring and rescale it to f32; if the ring is dry, play silence."
                 for sample in out.iter_mut() {
                     *sample = consumer
                         .pop()
-                        .map_or(0.0, |value| f32::from(value) / I16_TO_F32_SCALE);
+                        .map_or(0.0, |value| f32::from(value) / super::I16_TO_F32_SCALE);
                 }
             },
             |error| eprintln!("Audio output error: {error}"),
