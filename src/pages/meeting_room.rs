@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use crate::audio::audio_sink::AudioSink;
 use crate::audio::audio_source::AudioSource;
-use crate::video::{Frame, VideoSink, to_i420};
+use crate::video::video_sink::{Frame, VideoSink, to_i420};
 
 #[derive(Debug, Clone)]
 pub enum Status {

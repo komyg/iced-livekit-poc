@@ -5,8 +5,6 @@
 //! shader. That keeps the CPU out of the colour conversion and moves 1.5 bytes
 //! per pixel across the bus instead of RGBA's 4.
 
-mod pipeline;
-
 use std::sync::Arc;
 
 use iced::wgpu;
@@ -16,7 +14,7 @@ use livekit::webrtc::video_frame::{
     I420Buffer, VideoBuffer, VideoBufferType, VideoRotation, native::VideoFrameBufferExt,
 };
 
-use pipeline::VideoPipeline;
+use super::pipeline::VideoPipeline;
 
 /// One decoded frame, ready to hand to the GPU.
 ///
