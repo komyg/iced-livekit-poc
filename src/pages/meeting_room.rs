@@ -3,12 +3,21 @@ use std::sync::Arc;
 use iced::futures::{FutureExt, SinkExt, Stream, StreamExt, select, stream::SelectAll};
 use iced::widget::{container, shader, text};
 use iced::{Element, Length, Subscription};
+use livekit::options::TrackPublishOptions;
 use livekit::track::RemoteTrack;
+use livekit::track::TrackSource;
+use livekit::track::{LocalAudioTrack, LocalTrack};
+use livekit::webrtc::audio_frame::AudioFrame;
+use livekit::webrtc::audio_source::AudioSourceOptions;
+use livekit::webrtc::audio_source::RtcAudioSource;
+use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
 use livekit::webrtc::video_stream::native::NativeVideoStream;
 use livekit::{Room, RoomEvent, RoomOptions};
+use std::time::Duration;
 
 use crate::audio::audio_sink::AudioSink;
+use crate::audio::audio_source::AudioSource;
 use crate::video::{Frame, VideoSink, to_i420};
 
 #[derive(Debug, Clone)]
@@ -106,7 +115,7 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
     iced::stream::channel(2, async move |mut output| {
         let connection = Room::connect(&url, &token, RoomOptions::default()).await;
 
-        let (_room, mut events) = match connection {
+        let (room, mut events) = match connection {
             Ok(connection) => connection,
             Err(error) => {
                 let _ = output
@@ -129,8 +138,49 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
 
         // The sink lives for the loop's lifetime and stops playback when dropped.
         let mut audio_sink = AudioSink::new()
-            .inspect_err(|error| eprintln!("Audio disabled: {error}"))
+            .inspect_err(|error| eprintln!("Audio output disabled: {error}"))
             .ok();
+
+        let mut audio_source = AudioSource::new()
+            .inspect_err(|error| eprintln!("Audio input disabled: {error}"))
+            .ok();
+
+        let mut mic: Option<(NativeAudioSource, Vec<i16>)> = None;
+        let format = audio_source
+            .as_ref()
+            .map(|source| (source.sample_rate, source.channels, source.frame_len()));
+
+        if let Some((sample_rate, channels, frame_len)) = format {
+            let rtc = NativeAudioSource::new(
+                AudioSourceOptions {
+                    echo_cancellation: true,
+                    noise_suppression: true,
+                    auto_gain_control: true,
+                },
+                sample_rate,
+                u32::from(channels),
+                0,
+            );
+            let track =
+                LocalAudioTrack::create_audio_track("mic", RtcAudioSource::Native(rtc.clone()));
+
+            mic = room
+                .local_participant()
+                .publish_track(
+                    LocalTrack::Audio(track),
+                    TrackPublishOptions {
+                        source: TrackSource::Microphone,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map(|_publication| (rtc, Vec::with_capacity(frame_len)))
+                .inspect_err(|error| eprintln!("Failed to publish microphone: {error}"))
+                .ok();
+        }
+
+        // Cancel-safe, and cheap: 10 ms is exactly one WebRTC frame.
+        let mut ticker = tokio::time::interval(Duration::from_millis(10));
 
         loop {
             select! {
@@ -162,6 +212,7 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                                     rate,
                                     channels,
                                 ));
+
                             }
                         }
                         RoomEvent::Reconnecting => {
@@ -208,6 +259,26 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
 
                     if let Some(sink) = &mut audio_sink {
                         sink.push(&frame);
+                    }
+                }
+                _ = ticker.tick().fuse() => {
+                    let (Some(source), Some((rtc, buffer))) = (&mut audio_source, &mut mic)
+                        else { continue };
+
+                    // Drain whatever the mic has queued; false = less than a full
+                    // frame ready, so we wait for the next tick.
+                    while source.pop_frame(buffer) {
+                        let frame = AudioFrame {
+                            data: buffer.as_slice().into(),
+                            sample_rate: source.sample_rate,
+                            num_channels: u32::from(source.channels),
+                            samples_per_channel: source.sample_rate / 100,
+                        };
+
+                        if let Err(error) = rtc.capture_frame(&frame).await {
+                            eprintln!("Mic capture failed: {error}");
+                            break;
+                        }
                     }
                 }
                 // Required: `select!` panics if every branch is terminated and
