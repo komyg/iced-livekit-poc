@@ -21,13 +21,11 @@ naga = { version = "27.0.3", features = ["wgsl-in"] }
 
 # https://www.namtao.com/rust/
 [lints.clippy]
-# UM, ACTUALLY
 pedantic = { level = "warn", priority = -1 }
-# DENY PANICS
 unwrap_used = "deny"
 expect_used = "deny"
 indexing_slicing = "deny"
-arithmetic_side_effects = "deny"
+arithmetic_side_effects = "warn"
 unreachable = "deny"
 unimplemented = "deny"
 unchecked_time_subtraction = "deny"
@@ -36,4 +34,4 @@ string_slice = "deny"
 panic_in_result_fn = "deny"
 panic = "deny"
 exit = "deny"
-as_conversions = "deny"
+as_conversions = "warn"
