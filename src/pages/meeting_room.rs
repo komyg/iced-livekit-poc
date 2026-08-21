@@ -1,24 +1,31 @@
 use std::sync::Arc;
 
-use iced::futures::{FutureExt, SinkExt, Stream, StreamExt, select, stream::SelectAll};
+use iced::futures::stream::BoxStream;
+use iced::futures::{FutureExt, SinkExt, Stream, StreamExt, select, stream, stream::SelectAll};
 use iced::widget::{container, shader, text};
 use iced::{Element, Length, Subscription};
 use livekit::options::TrackPublishOptions;
 use livekit::track::RemoteTrack;
 use livekit::track::TrackSource;
-use livekit::track::{LocalAudioTrack, LocalTrack};
+use livekit::track::{LocalAudioTrack, LocalTrack, LocalVideoTrack};
 use livekit::webrtc::audio_frame::AudioFrame;
 use livekit::webrtc::audio_source::AudioSourceOptions;
 use livekit::webrtc::audio_source::RtcAudioSource;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
+use livekit::webrtc::video_frame::{I420Buffer, VideoBuffer, VideoFrame, VideoRotation};
+use livekit::webrtc::video_source::native::NativeVideoSource;
+use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
 use livekit::webrtc::video_stream::native::NativeVideoStream;
 use livekit::{Room, RoomEvent, RoomOptions};
 use std::time::Duration;
+use tokio::sync::watch;
+use tokio::time::MissedTickBehavior;
 
 use crate::audio::audio_sink::AudioSink;
 use crate::audio::audio_source::AudioSource;
 use crate::video::video_sink::{Frame, VideoSink, to_i420};
+use crate::video::video_source::VideoSource;
 
 #[derive(Debug, Clone)]
 pub enum Status {
@@ -48,6 +55,7 @@ impl Status {
 pub enum MeetingRoomMessage {
     Status(Status),
     Frame(Frame),
+    LocalFrame(Frame),
 }
 
 pub struct MeetingRoomPage {
@@ -55,6 +63,7 @@ pub struct MeetingRoomPage {
     url: String,
     status: Status,
     frame: Option<Frame>,
+    local_frame: Option<Frame>,
 }
 
 impl MeetingRoomPage {
@@ -64,11 +73,14 @@ impl MeetingRoomPage {
             url,
             status: Status::Connecting,
             frame: None,
+            local_frame: None,
         }
     }
 
     pub fn view(&self) -> Element<'_, MeetingRoomMessage> {
-        let content: Element<'_, MeetingRoomMessage> = match &self.frame {
+        let displayed = self.frame.as_ref().or(self.local_frame.as_ref());
+
+        let content: Element<'_, MeetingRoomMessage> = match displayed {
             Some(frame) if !self.status.is_error() => shader(VideoSink::new(frame.clone()))
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -94,6 +106,7 @@ impl MeetingRoomPage {
         match message {
             MeetingRoomMessage::Status(status) => self.status = status,
             MeetingRoomMessage::Frame(frame) => self.frame = Some(frame),
+            MeetingRoomMessage::LocalFrame(frame) => self.local_frame = Some(frame),
         }
     }
 
@@ -107,12 +120,93 @@ impl MeetingRoomPage {
     }
 }
 
+/// Publishes a microphone track matched to the capture device's own format, so
+/// WebRTC never has to resample. Returns the source paired with the scratch
+/// buffer the capture loop drains into.
+async fn publish_microphone(
+    room: &Room,
+    sample_rate: u32,
+    channels: u16,
+    frame_len: usize,
+) -> Option<(NativeAudioSource, Vec<i16>)> {
+    let rtc = NativeAudioSource::new(
+        AudioSourceOptions {
+            echo_cancellation: true,
+            noise_suppression: true,
+            auto_gain_control: true,
+        },
+        sample_rate,
+        u32::from(channels),
+        0,
+    );
+    let track = LocalAudioTrack::create_audio_track("mic", RtcAudioSource::Native(rtc.clone()));
+
+    room.local_participant()
+        .publish_track(
+            LocalTrack::Audio(track),
+            TrackPublishOptions {
+                source: TrackSource::Microphone,
+                ..Default::default()
+            },
+        )
+        .await
+        .map(|_publication| (rtc, Vec::with_capacity(frame_len)))
+        .inspect_err(|error| eprintln!("Failed to publish microphone: {error}"))
+        .ok()
+}
+
+/// Publishes a camera track sized to what the device actually gave us.
+///
+/// `None` means the track never made it to the room, so captured frames are
+/// still worth showing locally but must not be handed to WebRTC.
+async fn publish_camera(room: &Room, width: u32, height: u32) -> Option<NativeVideoSource> {
+    let rtc = NativeVideoSource::new(VideoResolution { width, height }, false);
+    let track = LocalVideoTrack::create_video_track("camera", RtcVideoSource::Native(rtc.clone()));
+
+    room.local_participant()
+        .publish_track(
+            LocalTrack::Video(track),
+            TrackPublishOptions {
+                source: TrackSource::Camera,
+                ..Default::default()
+            },
+        )
+        .await
+        .map(|_publication| rtc)
+        .inspect_err(|error| eprintln!("Failed to publish camera: {error}"))
+        .ok()
+}
+
+/// Turns the camera's latest-frame slot into a stream, so it can sit in the
+/// same `SelectAll` machinery as the remote tracks.
+///
+/// Ends when the capture thread drops its sender, which is what makes the
+/// `SelectAll` branch go quiet instead of spinning on a dead channel.
+fn camera_stream(
+    receiver: watch::Receiver<Option<Arc<I420Buffer>>>,
+) -> impl Stream<Item = Arc<I420Buffer>> + Send {
+    stream::unfold(receiver, async |mut receiver| {
+        loop {
+            receiver.changed().await.ok()?;
+
+            // Scoped so the borrow guard is released before the next await.
+            let frame = receiver.borrow_and_update().clone();
+
+            if let Some(frame) = frame {
+                return Some((frame, receiver));
+            }
+        }
+    })
+}
+
 fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + use<> {
     let (url, token) = data.clone();
 
     // A small buffer plus LiveKit's own keep-newest frame queue means a slow UI
-    // drops stale frames at the source instead of accumulating latency.
-    iced::stream::channel(2, async move |mut output| {
+    // drops stale frames at the source instead of accumulating latency. Two
+    // producers now share it — the camera and the remote track — so it needs a
+    // slot each, or `try_send` starves whichever one loses the race.
+    iced::stream::channel(4, async move |mut output| {
         let connection = Room::connect(&url, &token, RoomOptions::default()).await;
 
         let (room, mut events) = match connection {
@@ -136,6 +230,10 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
         let mut audio: SelectAll<NativeAudioStream> = SelectAll::new();
         let mut frame_id: u64 = 0;
 
+        // Diagnostics: which of the two video directions is actually alive.
+        let mut remote_frames: u64 = 0;
+        let mut local_frames: u64 = 0;
+
         // The sink lives for the loop's lifetime and stops playback when dropped.
         let mut audio_sink = AudioSink::new()
             .inspect_err(|error| eprintln!("Audio output disabled: {error}"))
@@ -151,36 +249,43 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
             .map(|source| (source.sample_rate, source.channels, source.frame_len()));
 
         if let Some((sample_rate, channels, frame_len)) = format {
-            let rtc = NativeAudioSource::new(
-                AudioSourceOptions {
-                    echo_cancellation: true,
-                    noise_suppression: true,
-                    auto_gain_control: true,
-                },
-                sample_rate,
-                u32::from(channels),
-                0,
-            );
-            let track =
-                LocalAudioTrack::create_audio_track("mic", RtcAudioSource::Native(rtc.clone()));
+            mic = publish_microphone(&room, sample_rate, channels, frame_len).await;
+        }
 
-            mic = room
-                .local_participant()
-                .publish_track(
-                    LocalTrack::Audio(track),
-                    TrackPublishOptions {
-                        source: TrackSource::Microphone,
-                        ..Default::default()
-                    },
-                )
-                .await
-                .map(|_publication| (rtc, Vec::with_capacity(frame_len)))
-                .inspect_err(|error| eprintln!("Failed to publish microphone: {error}"))
-                .ok();
+        // Opening a camera takes seconds, and on a first run it waits on the
+        // macOS permission prompt. Doing that inline would park an executor
+        // thread in the middle of connecting, so it goes to the blocking pool.
+        let camera_source = match tokio::task::spawn_blocking(VideoSource::new).await {
+            Ok(Ok(source)) => Some(source),
+            Ok(Err(error)) => {
+                eprintln!("Camera disabled: {error}");
+                None
+            }
+            Err(error) => {
+                eprintln!("Camera thread panicked: {error}");
+                None
+            }
+        };
+
+        // Same `SelectAll` trick as the remote streams: an absent camera leaves
+        // it empty, which reports as terminated instead of yielding forever.
+        let mut camera_frames: SelectAll<BoxStream<'static, Arc<I420Buffer>>> = SelectAll::new();
+        let mut camera: Option<NativeVideoSource> = None;
+
+        if let Some(source) = &camera_source {
+            camera = publish_camera(&room, source.width, source.height).await;
+            camera_frames.push(camera_stream(source.frames()).boxed());
         }
 
         // Cancel-safe, and cheap: 10 ms is exactly one WebRTC frame.
         let mut ticker = tokio::time::interval(Duration::from_millis(10));
+
+        // `Burst` is the default: once an iteration overruns 10 ms, the ticker
+        // fires as fast as it can to catch up, and the branch wins the `select!`
+        // over and over while it does. That spins a worker thread instead of
+        // yielding to the camera, the remote streams, or iced's own redraws.
+        // Draining the mic ring is idempotent, so a late tick can just be late.
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
             select! {
@@ -235,15 +340,34 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                                 .await;
                             break;
                         }
-                        _ => {}
+                        RoomEvent::TrackSubscriptionFailed { error, track_sid, .. } => {
+                            eprintln!("Track subscription failed for {track_sid}: {error}");
+                        }
+                        // Room events are infrequent, so logging the rest costs
+                        // nothing and makes a track that never arrives visible
+                        // instead of silently swallowed.
+                        event => eprintln!("Room event: {event:?}"),
                     }
                 }
                 frame = videos.next() => {
                     let Some(frame) = frame else { continue };
 
                     let Some(buffer) = to_i420(&*frame.buffer) else {
+                        eprintln!(
+                            "Dropped a remote frame in an unconvertible format: {:?}",
+                            frame.buffer.buffer_type(),
+                        );
                         continue;
                     };
+
+                    remote_frames = remote_frames.wrapping_add(1);
+                    if remote_frames == 1 {
+                        eprintln!(
+                            "First remote frame: {}x{}",
+                            buffer.width(),
+                            buffer.height(),
+                        );
+                    }
 
                     frame_id = frame_id.wrapping_add(1);
 
@@ -259,6 +383,44 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
 
                     if let Some(sink) = &mut audio_sink {
                         sink.push(&frame);
+                    }
+                }
+                buffer = camera_frames.next() => {
+                    let Some(buffer) = buffer else { continue };
+
+                    // Unlike the mic, video capture is synchronous — every
+                    // conversion already happened on the capture thread.
+                    if let Some(rtc) = &camera {
+                        rtc.capture_frame(&VideoFrame::new(
+                            VideoRotation::VideoRotation0,
+                            &*buffer,
+                        ));
+
+                        local_frames = local_frames.wrapping_add(1);
+                        if local_frames == 1 {
+                            eprintln!(
+                                "First frame captured to the room: {}x{}",
+                                buffer.width(),
+                                buffer.height(),
+                            );
+                        }
+                    }
+
+                    // The self-view is only ever displayed until a remote track
+                    // arrives, so once one has, sending it up is pure waste: it
+                    // burns a redraw that paints an unchanged remote frame and
+                    // costs the remote stream a slot in a 4-deep channel.
+                    if remote_frames == 0 {
+                        // Sharing the remote counter keeps local and remote ids
+                        // distinct, so the pipeline never mistakes one for a
+                        // repeat of the other and skips the upload.
+                        frame_id = frame_id.wrapping_add(1);
+
+                        let _ = output.try_send(MeetingRoomMessage::LocalFrame(Frame::new(
+                            buffer,
+                            frame_id,
+                            VideoRotation::VideoRotation0,
+                        )));
                     }
                 }
                 _ = ticker.tick().fuse() => {

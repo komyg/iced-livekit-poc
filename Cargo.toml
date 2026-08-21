@@ -14,11 +14,19 @@ livekit-api = "0.6.1"
 nokhwa = { version = "0.10.11", features = ["input-avfoundation"]}
 rtrb = "0.3.4"
 serde = "1.0.229"
-tokio = "1.53.1"
+tokio = { version = "1.53.1", features = ["sync"] }
 
 [dev-dependencies]
 # Same version wgpu 27 uses, so the test validates what the GPU will see.
 naga = { version = "27.0.3", features = ["wgsl-in"] }
+
+# nokhwa's YUYV -> RGBA decoder is a per-pixel Rust loop, we must optimize it,
+# otherwise it costs 230 ms per 720p frame — 4 fps, against a camera-limited 30 fps.
+[profile.dev]
+opt-level = 1
+
+[profile.test]
+opt-level = 1
 
 # https://www.namtao.com/rust/
 [lints.clippy]
