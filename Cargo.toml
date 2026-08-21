@@ -2,6 +2,7 @@
 name = "iced-pv-meet-poc"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 bytemuck = { version = "1.25", features = ["derive"] }
