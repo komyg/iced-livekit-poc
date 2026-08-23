@@ -1,9 +1,9 @@
 use iced::widget::{button, svg};
 use iced::{Background, Color, Element, border};
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Copy, Clone)]
 pub(super) struct MeetingControls {
-    microphone_muted: bool,
+    pub(super) microphone_muted: bool,
 }
 
 #[derive(Clone, Copy, Debug)]

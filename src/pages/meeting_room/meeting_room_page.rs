@@ -1,10 +1,12 @@
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use iced::futures::stream::BoxStream;
 use iced::futures::{FutureExt, SinkExt, Stream, StreamExt, select, stream, stream::SelectAll};
-use iced::widget::{container, shader, stack, svg, text};
+use iced::widget::{container, shader, stack, text};
 use iced::{Element, Length, Subscription, padding};
 use livekit::options::TrackPublishOptions;
+use livekit::publication::LocalTrackPublication;
 use livekit::track::RemoteTrack;
 use livekit::track::TrackSource;
 use livekit::track::{LocalAudioTrack, LocalTrack, LocalVideoTrack};
@@ -60,6 +62,29 @@ pub enum MeetingRoomMessage {
     MeetingControls(MeetingControlsMessage),
 }
 
+/// What identifies the room connection, plus the control channel that rides
+/// along with it.
+///
+/// A subscription only ever emits messages upwards, so anything the UI needs to
+/// tell the room mid-call has to travel out of band — here, a `watch` slot the
+/// page writes and the stream reads.
+#[derive(Clone)]
+struct Connection {
+    url: String,
+    token: String,
+    controls: watch::Receiver<MeetingControls>,
+}
+
+impl Hash for Connection {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Deliberately excludes `controls`: this hash is the subscription's
+        // identity, so folding a live control into it would tear the room down
+        // and reconnect on every mute toggle.
+        self.url.hash(state);
+        self.token.hash(state);
+    }
+}
+
 pub struct MeetingRoomPage {
     token: String,
     url: String,
@@ -67,17 +92,20 @@ pub struct MeetingRoomPage {
     frame: Option<Frame>,
     local_frame: Option<Frame>,
     meeting_controls: MeetingControls,
+    controls: watch::Sender<MeetingControls>,
 }
 
 impl MeetingRoomPage {
-    pub const fn new(token: String, url: String) -> Self {
+    pub fn new(token: String, url: String) -> Self {
+        let meeting_controls = MeetingControls::new();
         Self {
             token,
             url,
             status: Status::Connecting,
             frame: None,
             local_frame: None,
-            meeting_controls: MeetingControls::new(),
+            meeting_controls,
+            controls: watch::Sender::new(meeting_controls),
         }
     }
 
@@ -121,7 +149,15 @@ impl MeetingRoomPage {
             MeetingRoomMessage::Status(status) => self.status = status,
             MeetingRoomMessage::Frame(frame) => self.frame = Some(frame),
             MeetingRoomMessage::LocalFrame(frame) => self.local_frame = Some(frame),
-            MeetingRoomMessage::MeetingControls(message) => self.meeting_controls.update(message),
+            MeetingRoomMessage::MeetingControls(message) => {
+                self.meeting_controls.update(message);
+
+                // `send_modify` rather than `send`: the latter errors while no
+                // receiver exists, which is exactly the window between building
+                // the page and the subscription starting.
+                let controls = self.meeting_controls;
+                self.controls.send_modify(|slot| *slot = controls);
+            }
         }
     }
 
@@ -131,19 +167,27 @@ impl MeetingRoomPage {
     /// exactly the right lifetime — dropping the subscription tears down the
     /// room and every video stream together.
     pub fn subscription(&self) -> Subscription<MeetingRoomMessage> {
-        Subscription::run_with((self.url.clone(), self.token.clone()), connect)
+        Subscription::run_with(
+            Connection {
+                url: self.url.clone(),
+                token: self.token.clone(),
+                controls: self.controls.subscribe(),
+            },
+            connect,
+        )
     }
 }
 
 /// Publishes a microphone track matched to the capture device's own format, so
 /// WebRTC never has to resample. Returns the source paired with the scratch
-/// buffer the capture loop drains into.
+/// buffer the capture loop drains into, plus the publication that mute goes
+/// through.
 async fn publish_microphone(
     room: &Room,
     sample_rate: u32,
     channels: u16,
     frame_len: usize,
-) -> Option<(NativeAudioSource, Vec<i16>)> {
+) -> Option<(NativeAudioSource, Vec<i16>, LocalTrackPublication)> {
     let rtc = NativeAudioSource::new(
         AudioSourceOptions {
             echo_cancellation: true,
@@ -165,7 +209,7 @@ async fn publish_microphone(
             },
         )
         .await
-        .map(|_publication| (rtc, Vec::with_capacity(frame_len)))
+        .map(|publication| (rtc, Vec::with_capacity(frame_len), publication))
         .inspect_err(|error| eprintln!("Failed to publish microphone: {error}"))
         .ok()
 }
@@ -214,8 +258,12 @@ fn camera_stream(
     })
 }
 
-fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + use<> {
-    let (url, token) = data.clone();
+fn connect(data: &Connection) -> impl Stream<Item = MeetingRoomMessage> + use<> {
+    let Connection {
+        url,
+        token,
+        mut controls,
+    } = data.clone();
 
     // A small buffer plus LiveKit's own keep-newest frame queue means a slow UI
     // drops stale frames at the source instead of accumulating latency. Two
@@ -258,13 +306,21 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
             .inspect_err(|error| eprintln!("Audio input disabled: {error}"))
             .ok();
 
-        let mut mic: Option<(NativeAudioSource, Vec<i16>)> = None;
+        let mut mic: Option<(NativeAudioSource, Vec<i16>, LocalTrackPublication)> = None;
         let format = audio_source
             .as_ref()
             .map(|source| (source.sample_rate, source.channels, source.frame_len()));
 
         if let Some((sample_rate, channels, frame_len)) = format {
             mic = publish_microphone(&room, sample_rate, channels, frame_len).await;
+        }
+
+        // Seeded from the slot rather than assumed false, so a toggle that
+        // landed while the room was still connecting is not lost.
+        let mut microphone_muted = controls.borrow_and_update().microphone_muted;
+
+        if microphone_muted && let Some((_, _, publication)) = &mic {
+            publication.mute();
         }
 
         // Opening a camera takes seconds, and on a first run it waits on the
@@ -438,13 +494,38 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                         )));
                     }
                 }
+                // Cancel-safe, so losing the race to another branch just means
+                // the change is picked up on the next pass.
+                changed = controls.changed().fuse() => {
+                    // Err means the page is gone; the stream is about to be
+                    // dropped along with it.
+                    if changed.is_err() { continue }
+
+                    microphone_muted = controls.borrow_and_update().microphone_muted;
+
+                    // Muting the publication rather than the track: both disable
+                    // the RTC track, but this one also tells the server, so the
+                    // others see a mute indicator instead of silence.
+                    if let Some((_, _, publication)) = &mic {
+                        if microphone_muted {
+                            publication.mute();
+                        } else {
+                            publication.unmute();
+                        }
+                    }
+                }
                 _ = ticker.tick().fuse() => {
-                    let (Some(source), Some((rtc, buffer))) = (&mut audio_source, &mut mic)
+                    let (Some(source), Some((rtc, buffer, _))) = (&mut audio_source, &mut mic)
                         else { continue };
 
                     // Drain whatever the mic has queued; false = less than a full
                     // frame ready, so we wait for the next tick.
                     while source.pop_frame(buffer) {
+                        // Drained even while muted — cpal keeps filling the ring
+                        // regardless, so stopping here would back it up and make
+                        // unmuting replay seconds of stale audio.
+                        if microphone_muted { continue }
+
                         let frame = AudioFrame {
                             data: buffer.as_slice().into(),
                             sample_rate: source.sample_rate,
