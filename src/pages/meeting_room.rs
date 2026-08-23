@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use iced::futures::stream::BoxStream;
 use iced::futures::{FutureExt, SinkExt, Stream, StreamExt, select, stream, stream::SelectAll};
-use iced::widget::{container, shader, text};
-use iced::{Element, Length, Subscription};
+use iced::widget::{container, shader, stack, svg, text};
+use iced::{Element, Length, Subscription, padding};
 use livekit::options::TrackPublishOptions;
 use livekit::track::RemoteTrack;
 use livekit::track::TrackSource;
@@ -24,6 +24,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::audio::audio_sink::AudioSink;
 use crate::audio::audio_source::AudioSource;
+use crate::pages::meeting_controls::{MeetingControls, MeetingControlsMessage};
 use crate::video::video_sink::{Frame, VideoSink, to_i420};
 use crate::video::video_source::VideoSource;
 
@@ -56,6 +57,7 @@ pub enum MeetingRoomMessage {
     Status(Status),
     Frame(Frame),
     LocalFrame(Frame),
+    MeetingControls(MeetingControlsMessage),
 }
 
 pub struct MeetingRoomPage {
@@ -64,6 +66,7 @@ pub struct MeetingRoomPage {
     status: Status,
     frame: Option<Frame>,
     local_frame: Option<Frame>,
+    meeting_controls: MeetingControls,
 }
 
 impl MeetingRoomPage {
@@ -74,6 +77,7 @@ impl MeetingRoomPage {
             status: Status::Connecting,
             frame: None,
             local_frame: None,
+            meeting_controls: MeetingControls::new(),
         }
     }
 
@@ -96,10 +100,20 @@ impl MeetingRoomPage {
             }
         };
 
-        container(content)
+        stack![
+            container(content)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+            container(
+                self.meeting_controls
+                    .view()
+                    .map(MeetingRoomMessage::MeetingControls)
+            )
             .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .into()
+            .align_bottom(Length::Fill)
+            .padding(padding::bottom(40))
+        ]
+        .into()
     }
 
     pub fn update(&mut self, message: MeetingRoomMessage) {
@@ -107,6 +121,7 @@ impl MeetingRoomPage {
             MeetingRoomMessage::Status(status) => self.status = status,
             MeetingRoomMessage::Frame(frame) => self.frame = Some(frame),
             MeetingRoomMessage::LocalFrame(frame) => self.local_frame = Some(frame),
+            MeetingRoomMessage::MeetingControls(message) => self.meeting_controls.update(message),
         }
     }
 
