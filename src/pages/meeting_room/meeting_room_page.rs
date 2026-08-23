@@ -521,9 +521,6 @@ fn connect(data: &Connection) -> impl Stream<Item = MeetingRoomMessage> + use<> 
                     // Drain whatever the mic has queued; false = less than a full
                     // frame ready, so we wait for the next tick.
                     while source.pop_frame(buffer) {
-                        // Drained even while muted — cpal keeps filling the ring
-                        // regardless, so stopping here would back it up and make
-                        // unmuting replay seconds of stale audio.
                         if microphone_muted { continue }
 
                         let frame = AudioFrame {
