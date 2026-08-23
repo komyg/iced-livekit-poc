@@ -1,4 +1,4 @@
-# iced-pv-meet-poc
+# Iced LiveKit Meet POC
 
 A proof of concept video-call client built with [iced](https://iced.rs) and
 [LiveKit](https://livekit.io). It captures the local camera and microphone,
