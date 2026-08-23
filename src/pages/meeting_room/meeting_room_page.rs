@@ -22,9 +22,9 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 
+use super::meeting_controls::{MeetingControls, MeetingControlsMessage};
 use crate::audio::audio_sink::AudioSink;
 use crate::audio::audio_source::AudioSource;
-use crate::pages::meeting_controls::{MeetingControls, MeetingControlsMessage};
 use crate::video::video_sink::{Frame, VideoSink, to_i420};
 use crate::video::video_source::VideoSource;
 

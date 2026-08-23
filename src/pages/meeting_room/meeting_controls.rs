@@ -21,10 +21,10 @@ impl MeetingControls {
     pub(super) fn view(&self) -> Element<'_, MeetingControlsMessage> {
         let microphone_icon = match self.microphone_muted {
             false => svg::Handle::from_memory(
-                include_bytes!("../../assets/microphone-solid-full.svg").as_slice(),
+                include_bytes!("../../../assets/microphone-solid-full.svg").as_slice(),
             ),
             true => svg::Handle::from_memory(
-                include_bytes!("../../assets/microphone-slash-solid-full.svg").as_slice(),
+                include_bytes!("../../../assets/microphone-slash-solid-full.svg").as_slice(),
             ),
         };
 
