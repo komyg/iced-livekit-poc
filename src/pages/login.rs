@@ -130,9 +130,9 @@ fn get_access_token(auth_data: &ApiKey) -> Result<String, String> {
         identity,
         room,
     } = auth_data;
-    AccessToken::with_api_key(&api_key, &api_secret)
-        .with_identity(&identity)
-        .with_name(&identity)
+    AccessToken::with_api_key(api_key, api_secret)
+        .with_identity(identity)
+        .with_name(identity)
         .with_grants(VideoGrants {
             room_join: true,
             room: room.clone(),

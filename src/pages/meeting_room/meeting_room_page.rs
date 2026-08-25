@@ -271,6 +271,11 @@ fn camera_toggles(receiver: watch::Receiver<bool>) -> impl Stream<Item = bool> +
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one `select!` loop over the room's lifetime; splitting the arms \
+              would scatter the shared connection state across helpers"
+)]
 fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + use<> {
     let (url, token) = data.clone();
 
@@ -316,7 +321,7 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
         let mut mic: Option<(NativeAudioSource, Vec<i16>)> = None;
         let format = audio_source
             .as_ref()
-            .map(|source| (source.sample_rate, source.channels, source.frame_len()));
+            .map(|source| (source.sample_rate, source.channels, source.frame_len));
 
         if let Some((sample_rate, channels, frame_len)) = format
             && let Some((rtc, buffer, publication)) =

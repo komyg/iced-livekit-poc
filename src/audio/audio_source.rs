@@ -8,6 +8,7 @@ pub struct AudioSource {
     consumer: Consumer<i16>,
     pub sample_rate: u32,
     pub channels: u16,
+    pub frame_len: usize,
     shutdown: Option<mpsc::Sender<()>>,
     handle: Option<JoinHandle<()>>,
 }
@@ -16,6 +17,7 @@ struct AudioInput {
     consumer: Consumer<i16>,
     sample_rate: u32,
     channels: u16,
+    frame_len: usize,
 }
 
 impl AudioSource {
@@ -35,14 +37,10 @@ impl AudioSource {
                 consumer: audio_input.consumer,
                 sample_rate: audio_input.sample_rate,
                 channels: audio_input.channels,
+                frame_len: audio_input.frame_len,
                 shutdown: Some(shutdown_tx),
                 handle: Some(handle),
             })
-    }
-
-    /// Samples per 10 ms frame, interleaved.
-    pub fn frame_len(&self) -> usize {
-        (self.sample_rate as usize / 100) * self.channels as usize
     }
 
     /// Fills `out` with one 10 ms frame. Returns `false` if the mic hasn't
@@ -50,7 +48,7 @@ impl AudioSource {
     pub fn pop_frame(&mut self, out: &mut Vec<i16>) -> bool {
         // `read_chunk` fails unless all `frame_len` samples are readable, so a
         // partial frame can never reach the caller.
-        let Ok(chunk) = self.consumer.read_chunk(self.frame_len()) else {
+        let Ok(chunk) = self.consumer.read_chunk(self.frame_len) else {
             return false;
         };
 
@@ -109,15 +107,20 @@ fn build_input_stream() -> Result<(cpal::Stream, AudioInput), String> {
     let capacity = usize::try_from(slots).map_err(|e| e.to_string())?;
     let (mut producer, consumer) = RingBuffer::<i16>::new(capacity);
 
+    // Samples per 10 ms frame, interleaved. Fixed for the life of the stream,
+    // so the fallible arithmetic happens once, here.
+    let samples = sample_rate
+        .checked_div(100)
+        .and_then(|per_channel| per_channel.checked_mul(u32::from(channels)))
+        .ok_or("Overflow in audio frame length calculation".to_string())?;
+    let frame_len = usize::try_from(samples).map_err(|e| e.to_string())?;
+
     let stream = device
         .build_input_stream(
             config.config(),
             move |input: &[f32], _: &cpal::InputCallbackInfo| {
                 for &sample in input {
-                    if producer
-                        .push((sample * super::I16_TO_F32_SCALE) as i16)
-                        .is_err()
-                    {
+                    if producer.push(super::f32_to_i16(sample)).is_err() {
                         break;
                     }
                 }
@@ -134,6 +137,7 @@ fn build_input_stream() -> Result<(cpal::Stream, AudioInput), String> {
             consumer,
             sample_rate,
             channels,
+            frame_len,
         },
     ))
 }
