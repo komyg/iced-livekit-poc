@@ -2,26 +2,26 @@ use iced::widget::{Button, button, row, svg};
 use iced::{Background, Color, Element, border};
 
 #[derive(Default, Debug, Copy, Clone)]
-pub(super) struct MeetingControls {
-    pub(super) microphone_muted: bool,
-    pub(super) camera_off: bool,
+pub struct MeetingControls {
+    pub microphone_muted: bool,
+    pub camera_off: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) enum MeetingControlsMessage {
+pub enum MeetingControlsMessage {
     ToggleMicrophone,
     ToggleCamera,
 }
 
 impl MeetingControls {
-    pub(super) const fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             microphone_muted: false,
             camera_off: false,
         }
     }
 
-    pub(super) fn view(&self) -> Element<'_, MeetingControlsMessage> {
+    pub fn view(&self) -> Element<'_, MeetingControlsMessage> {
         let microphone_icon = match self.microphone_muted {
             false => svg::Handle::from_memory(
                 include_bytes!("../../../assets/microphone-solid-full.svg").as_slice(),
@@ -48,7 +48,7 @@ impl MeetingControls {
         .into()
     }
 
-    pub(super) fn update(&mut self, message: MeetingControlsMessage) {
+    pub fn update(&mut self, message: MeetingControlsMessage) {
         match message {
             MeetingControlsMessage::ToggleMicrophone => {
                 self.microphone_muted = !self.microphone_muted;
