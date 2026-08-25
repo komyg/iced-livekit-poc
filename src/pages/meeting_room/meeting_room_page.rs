@@ -1,9 +1,13 @@
 use std::sync::Arc;
 
 use iced::futures::stream::BoxStream;
-use iced::futures::{FutureExt, SinkExt, Stream, StreamExt, select, stream, stream::SelectAll};
+use iced::futures::{
+    FutureExt, SinkExt, Stream, StreamExt, select, stream, stream::FuturesUnordered,
+    stream::SelectAll,
+};
 use iced::widget::{container, shader, stack, text};
 use iced::{Element, Length, Subscription, padding};
+use livekit::id::TrackSid;
 use livekit::options::TrackPublishOptions;
 use livekit::publication::LocalTrackPublication;
 use livekit::track::RemoteTrack;
@@ -58,13 +62,10 @@ pub enum MeetingRoomMessage {
     Status(Status),
     Frame(Frame),
     LocalFrame(Frame),
+    RemoteVideoEnded,
     MeetingControls(MeetingControlsMessage),
-    /// The published microphone handle, handed up so the UI can mute it.
-    ///
-    /// A subscription only emits messages upwards, so rather than pushing the
-    /// control state down into the stream, the stream sends out the one handle
-    /// the UI needs and the page drives it directly.
     MicrophonePublished(LocalTrackPublication),
+    CameraControl(watch::Sender<bool>),
 }
 
 pub struct MeetingRoomPage {
@@ -75,6 +76,7 @@ pub struct MeetingRoomPage {
     local_frame: Option<Frame>,
     meeting_controls: MeetingControls,
     microphone: Option<LocalTrackPublication>,
+    camera_control: Option<watch::Sender<bool>>,
 }
 
 impl MeetingRoomPage {
@@ -87,6 +89,7 @@ impl MeetingRoomPage {
             local_frame: None,
             meeting_controls: MeetingControls::new(),
             microphone: None,
+            camera_control: None,
         }
     }
 
@@ -129,16 +132,26 @@ impl MeetingRoomPage {
         match message {
             MeetingRoomMessage::Status(status) => self.status = status,
             MeetingRoomMessage::Frame(frame) => self.frame = Some(frame),
-            MeetingRoomMessage::LocalFrame(frame) => self.local_frame = Some(frame),
+            MeetingRoomMessage::RemoteVideoEnded => self.frame = None,
+            MeetingRoomMessage::LocalFrame(frame) => {
+                if !self.meeting_controls.camera_off {
+                    self.local_frame = Some(frame);
+                }
+            }
             MeetingRoomMessage::MeetingControls(message) => {
                 self.meeting_controls.update(message);
                 self.apply_controls();
+
+                if self.meeting_controls.camera_off {
+                    self.local_frame = None;
+                }
             }
             MeetingRoomMessage::MicrophonePublished(publication) => {
                 self.microphone = Some(publication);
-
-                // A toggle can land while the track is still being published,
-                // so apply the current state rather than assume it starts live.
+                self.apply_controls();
+            }
+            MeetingRoomMessage::CameraControl(sender) => {
+                self.camera_control = Some(sender);
                 self.apply_controls();
             }
         }
@@ -151,6 +164,10 @@ impl MeetingRoomPage {
             } else {
                 microphone.unmute();
             }
+        }
+
+        if let Some(camera) = &self.camera_control {
+            let _ = camera.send(!self.meeting_controls.camera_off);
         }
     }
 
@@ -200,11 +217,11 @@ async fn publish_microphone(
         .ok()
 }
 
-/// Publishes a camera track sized to what the device actually gave us.
-///
-/// `None` means the track never made it to the room, so captured frames are
-/// still worth showing locally but must not be handed to WebRTC.
-async fn publish_camera(room: &Room, width: u32, height: u32) -> Option<NativeVideoSource> {
+async fn publish_camera(
+    room: &Room,
+    width: u32,
+    height: u32,
+) -> Option<(NativeVideoSource, LocalTrackPublication)> {
     let rtc = NativeVideoSource::new(VideoResolution { width, height }, false);
     let track = LocalVideoTrack::create_video_track("camera", RtcVideoSource::Native(rtc.clone()));
 
@@ -217,7 +234,7 @@ async fn publish_camera(room: &Room, width: u32, height: u32) -> Option<NativeVi
             },
         )
         .await
-        .map(|_publication| rtc)
+        .map(|publication| (rtc, publication))
         .inspect_err(|error| eprintln!("Failed to publish camera: {error}"))
         .ok()
 }
@@ -241,6 +258,16 @@ fn camera_stream(
                 return Some((frame, receiver));
             }
         }
+    })
+}
+
+fn camera_toggles(receiver: watch::Receiver<bool>) -> impl Stream<Item = bool> + Send {
+    stream::unfold(receiver, async |mut receiver| {
+        receiver.changed().await.ok()?;
+
+        let wanted = *receiver.borrow_and_update();
+
+        Some((wanted, receiver))
     })
 }
 
@@ -275,6 +302,8 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
         let mut audio: SelectAll<NativeAudioStream> = SelectAll::new();
         let mut frame_id: u64 = 0;
 
+        let mut remote_video: Option<TrackSid> = None;
+
         // Diagnostics: which of the two video directions is actually alive.
         let mut remote_frames: u64 = 0;
         let mut local_frames: u64 = 0;
@@ -306,10 +335,15 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
             mic = Some((rtc, buffer));
         }
 
-        // Opening a camera takes seconds, and on a first run it waits on the
-        // macOS permission prompt. Doing that inline would park an executor
-        // thread in the middle of connecting, so it goes to the blocking pool.
-        let camera_source = match tokio::task::spawn_blocking(VideoSource::new).await {
+        let (camera_tx, camera_rx) = watch::channel(true);
+        let mut camera_wanted = camera_toggles(camera_rx).boxed().fuse();
+
+        let _ = output
+            .send(MeetingRoomMessage::CameraControl(camera_tx))
+            .await;
+
+        // Don't block while waiting for the camera to open.
+        let mut camera_source = match tokio::task::spawn_blocking(VideoSource::new).await {
             Ok(Ok(source)) => Some(source),
             Ok(Err(error)) => {
                 eprintln!("Camera disabled: {error}");
@@ -325,9 +359,21 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
         // it empty, which reports as terminated instead of yielding forever.
         let mut camera_frames: SelectAll<BoxStream<'static, Arc<I420Buffer>>> = SelectAll::new();
         let mut camera: Option<NativeVideoSource> = None;
+        let mut camera_publication: Option<LocalTrackPublication> = None;
+
+        let mut camera_opens: FuturesUnordered<
+            tokio::task::JoinHandle<Result<VideoSource, String>>,
+        > = FuturesUnordered::new();
+        let mut camera_on = true;
 
         if let Some(source) = &camera_source {
-            camera = publish_camera(&room, source.width, source.height).await;
+            if let Some((rtc, publication)) =
+                publish_camera(&room, source.width, source.height).await
+            {
+                camera = Some(rtc);
+                camera_publication = Some(publication);
+            }
+
             camera_frames.push(camera_stream(source.frames()).boxed());
         }
 
@@ -351,9 +397,23 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                             track: RemoteTrack::Video(track),
                             ..
                         } if videos.is_empty() => {
+                            remote_video = Some(track.sid());
                             videos.push(
                                 NativeVideoStream::new(track.rtc_track()),
                             );
+                        }
+                        RoomEvent::TrackUnsubscribed {
+                            track: RemoteTrack::Video(track),
+                            ..
+                        } if remote_video.as_ref() == Some(&track.sid()) => {
+                            // The peer switched its camera off.
+                            videos.clear();
+                            remote_video = None;
+                            remote_frames = 0;
+
+                            let _ = output
+                                .send(MeetingRoomMessage::RemoteVideoEnded)
+                                .await;
                         }
                         RoomEvent::TrackSubscribed {
                             track: RemoteTrack::Audio(track),
@@ -476,6 +536,85 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                             VideoRotation::VideoRotation0,
                         )));
                     }
+                }
+                wanted = camera_wanted.next() => {
+                    let Some(wanted) = wanted else { continue };
+
+                    // `watch::send` notifies even when the value is unchanged,
+                    // and the page re-sends on every control press — so only a
+                    // real edge is worth acting on.
+                    if wanted == camera_on {
+                        continue;
+                    }
+
+                    camera_on = wanted;
+
+                    if wanted {
+                        // An open already in flight covers this request; a
+                        // second one would fight it for the device.
+                        if camera_source.is_none() && camera_opens.is_empty() {
+                            camera_opens.push(
+                                tokio::task::spawn_blocking(VideoSource::new),
+                            );
+                        }
+                    } else if let Some(source) = camera_source.take() {
+                        // Only ever once per publication: livekit unwraps the
+                        // track inside `unpublish_track`, so a second call for
+                        // the same sid panics.
+                        if let Some(publication) = camera_publication.take()
+                            && let Err(error) = room
+                                .local_participant()
+                                .unpublish_track(&publication.sid())
+                                .await
+                        {
+                            eprintln!("Failed to unpublish camera: {error}");
+                        }
+
+                        // Stops feeding a track that no longer exists, and
+                        // drops the capture stream before the thread winds
+                        // down, so no late frame reaches the next camera.
+                        camera = None;
+                        camera_frames.clear();
+
+                        // `Drop` joins the capture thread, which can be sitting
+                        // in a blocking frame grab.
+                        tokio::task::spawn_blocking(move || drop(source));
+                    }
+                }
+                opened = camera_opens.next() => {
+                    let source = match opened {
+                        Some(Ok(Ok(source))) => source,
+                        Some(Ok(Err(error))) => {
+                            eprintln!("Camera disabled: {error}");
+                            continue;
+                        }
+                        Some(Err(error)) => {
+                            eprintln!("Camera thread panicked: {error}");
+                            continue;
+                        }
+                        None => continue,
+                    };
+
+                    // Seconds pass while the device comes up, which is long
+                    // enough for the switch to have flipped back.
+                    if !camera_on {
+                        tokio::task::spawn_blocking(move || drop(source));
+                        continue;
+                    }
+
+                    if let Some((rtc, publication)) =
+                        publish_camera(&room, source.width, source.height).await
+                    {
+                        camera = Some(rtc);
+                        camera_publication = Some(publication);
+                    }
+
+                    camera_frames.clear();
+                    camera_frames.push(camera_stream(source.frames()).boxed());
+                    camera_source = Some(source);
+
+                    // So the first-frame log below reports the restart too.
+                    local_frames = 0;
                 }
                 _ = ticker.tick().fuse() => {
                     let (Some(source), Some((rtc, buffer))) = (&mut audio_source, &mut mic)
