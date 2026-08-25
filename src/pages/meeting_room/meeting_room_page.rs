@@ -167,7 +167,10 @@ impl MeetingRoomPage {
         }
 
         if let Some(camera) = &self.camera_control {
-            let _ = camera.send(!self.meeting_controls.camera_off);
+            // Only notifies the room loop on a real change, so re-sends from
+            // unrelated control presses don't wake it.
+            let wanted = !self.meeting_controls.camera_off;
+            camera.send_if_modified(|on| std::mem::replace(on, wanted) != wanted);
         }
     }
 
@@ -517,13 +520,6 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                 }
                 camera_wanted = camera_toggles.next() => {
                     let Some(camera_wanted) = camera_wanted else { continue };
-
-                    // `watch::send` notifies even when the value is unchanged,
-                    // and the page re-sends on every control press — so only a
-                    // real edge is worth acting on.
-                    if camera_wanted == camera_on {
-                        continue;
-                    }
 
                     camera_on = camera_wanted;
 
