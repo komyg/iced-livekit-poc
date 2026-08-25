@@ -265,9 +265,9 @@ fn camera_toggles(receiver: watch::Receiver<bool>) -> impl Stream<Item = bool> +
     stream::unfold(receiver, async |mut receiver| {
         receiver.changed().await.ok()?;
 
-        let wanted = *receiver.borrow_and_update();
+        let camera_wanted = *receiver.borrow_and_update();
 
-        Some((wanted, receiver))
+        Some((camera_wanted, receiver))
     })
 }
 
@@ -295,9 +295,6 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
 
         let _ = output.send(MeetingRoomMessage::Status(Status::Live)).await;
 
-        // `SelectAll` drops substreams that finish, and reports itself as
-        // terminated while empty — so `select!` skips the branch entirely
-        // rather than spinning on a stream that has already returned `None`.
         let mut videos: SelectAll<NativeVideoStream> = SelectAll::new();
         let mut audio: SelectAll<NativeAudioStream> = SelectAll::new();
         let mut frame_id: u64 = 0;
@@ -308,7 +305,6 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
         let mut remote_frames: u64 = 0;
         let mut local_frames: u64 = 0;
 
-        // The sink lives for the loop's lifetime and stops playback when dropped.
         let mut audio_sink = AudioSink::new()
             .inspect_err(|error| eprintln!("Audio output disabled: {error}"))
             .ok();
@@ -326,8 +322,6 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
             && let Some((rtc, buffer, publication)) =
                 publish_microphone(&room, sample_rate, channels, frame_len).await
         {
-            // Mute is the page's job, so the handle goes up and the capture
-            // loop keeps only what it needs to feed frames.
             let _ = output
                 .send(MeetingRoomMessage::MicrophonePublished(publication))
                 .await;
@@ -336,7 +330,7 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
         }
 
         let (camera_tx, camera_rx) = watch::channel(true);
-        let mut camera_wanted = camera_toggles(camera_rx).boxed().fuse();
+        let mut camera_toggles = camera_toggles(camera_rx).boxed().fuse();
 
         let _ = output
             .send(MeetingRoomMessage::CameraControl(camera_tx))
@@ -355,8 +349,6 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
             }
         };
 
-        // Same `SelectAll` trick as the remote streams: an absent camera leaves
-        // it empty, which reports as terminated instead of yielding forever.
         let mut camera_frames: SelectAll<BoxStream<'static, Arc<I420Buffer>>> = SelectAll::new();
         let mut camera: Option<NativeVideoSource> = None;
         let mut camera_publication: Option<LocalTrackPublication> = None;
@@ -379,12 +371,6 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
 
         // Cancel-safe, and cheap: 10 ms is exactly one WebRTC frame.
         let mut ticker = tokio::time::interval(Duration::from_millis(10));
-
-        // `Burst` is the default: once an iteration overruns 10 ms, the ticker
-        // fires as fast as it can to catch up, and the branch wins the `select!`
-        // over and over while it does. That spins a worker thread instead of
-        // yielding to the camera, the remote streams, or iced's own redraws.
-        // Draining the mic ring is idempotent, so a late tick can just be late.
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
@@ -419,9 +405,6 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                             track: RemoteTrack::Audio(track),
                             ..
                         } if audio.is_empty() => {
-                            // Ask WebRTC to decode straight to the device's own
-                            // rate/channels so playback never has to resample.
-                            // No sink means no output device — skip decoding.
                             if let Some(sink) = &audio_sink
                                 && let Ok(rate) = i32::try_from(sink.sample_rate)
                             {
@@ -457,9 +440,6 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                         RoomEvent::TrackSubscriptionFailed { error, track_sid, .. } => {
                             eprintln!("Track subscription failed for {track_sid}: {error}");
                         }
-                        // Room events are infrequent, so logging the rest costs
-                        // nothing and makes a track that never arrives visible
-                        // instead of silently swallowed.
                         event => eprintln!("Room event: {event:?}"),
                     }
                 }
@@ -520,14 +500,7 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                         }
                     }
 
-                    // The self-view is only ever displayed until a remote track
-                    // arrives, so once one has, sending it up is pure waste: it
-                    // burns a redraw that paints an unchanged remote frame and
-                    // costs the remote stream a slot in a 4-deep channel.
                     if remote_frames == 0 {
-                        // Sharing the remote counter keeps local and remote ids
-                        // distinct, so the pipeline never mistakes one for a
-                        // repeat of the other and skips the upload.
                         frame_id = frame_id.wrapping_add(1);
 
                         let _ = output.try_send(MeetingRoomMessage::LocalFrame(Frame::new(
@@ -537,19 +510,19 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                         )));
                     }
                 }
-                wanted = camera_wanted.next() => {
-                    let Some(wanted) = wanted else { continue };
+                camera_wanted = camera_toggles.next() => {
+                    let Some(camera_wanted) = camera_wanted else { continue };
 
                     // `watch::send` notifies even when the value is unchanged,
                     // and the page re-sends on every control press — so only a
                     // real edge is worth acting on.
-                    if wanted == camera_on {
+                    if camera_wanted == camera_on {
                         continue;
                     }
 
-                    camera_on = wanted;
+                    camera_on = camera_wanted;
 
-                    if wanted {
+                    if camera_wanted {
                         // An open already in flight covers this request; a
                         // second one would fight it for the device.
                         if camera_source.is_none() && camera_opens.is_empty() {
