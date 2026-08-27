@@ -5,12 +5,14 @@ use iced::{Background, Color, Element, border};
 pub struct MeetingControls {
     pub microphone_muted: bool,
     pub camera_off: bool,
+    pub chat_hidden: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum MeetingControlsMessage {
     ToggleMicrophone,
     ToggleCamera,
+    ToggleChat,
 }
 
 impl MeetingControls {
@@ -18,6 +20,7 @@ impl MeetingControls {
         Self {
             microphone_muted: false,
             camera_off: false,
+            chat_hidden: true,
         }
     }
 
@@ -42,9 +45,20 @@ impl MeetingControls {
             )
         };
 
+        let chat_icon = if self.chat_hidden {
+            svg::Handle::from_memory(
+                include_bytes!("../../../assets/comment-slash-solid-full.svg").as_slice(),
+            )
+        } else {
+            svg::Handle::from_memory(
+                include_bytes!("../../../assets/comment-dots-solid-full.svg").as_slice(),
+            )
+        };
+
         row![
             control_button(microphone_icon, MeetingControlsMessage::ToggleMicrophone),
             control_button(camera_icon, MeetingControlsMessage::ToggleCamera),
+            control_button(chat_icon, MeetingControlsMessage::ToggleChat),
         ]
         .spacing(12)
         .into()
@@ -57,6 +71,9 @@ impl MeetingControls {
             }
             MeetingControlsMessage::ToggleCamera => {
                 self.camera_off = !self.camera_off;
+            }
+            MeetingControlsMessage::ToggleChat => {
+                self.chat_hidden = !self.chat_hidden;
             }
         }
     }
