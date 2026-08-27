@@ -51,7 +51,7 @@ impl MeetingControls {
             )
         } else {
             svg::Handle::from_memory(
-                include_bytes!("../../../assets/comment-dots-solid-full.svg").as_slice(),
+                include_bytes!("../../../assets/comment-solid-full.svg").as_slice(),
             )
         };
 
