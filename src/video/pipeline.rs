@@ -46,92 +46,77 @@ pub struct VideoPipeline {
 }
 
 impl Pipeline for VideoPipeline {
-    fn new(
-        device: &wgpu::Device,
-        _queue: &wgpu::Queue,
-        format: wgpu::TextureFormat,
-    ) -> Self {
+    fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("video.yuv.shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
-                include_str!("yuv.wgsl"),
-            )),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("yuv.wgsl"))),
         });
 
-        let layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("video.yuv.bind_group_layout"),
-                entries: &[
-                    plane_entry(0),
-                    plane_entry(1),
-                    plane_entry(2),
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(
-                            wgpu::SamplerBindingType::Filtering,
-                        ),
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 4,
-                        // The vertex stage reads scale/rotation, the fragment
-                        // stage reads the srgb flag.
-                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-            });
-
-        let pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("video.yuv.pipeline_layout"),
-                bind_group_layouts: &[&layout],
-                push_constant_ranges: &[],
-            });
-
-        let pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("video.yuv.pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[],
-                    compilation_options:
-                        wgpu::PipelineCompilationOptions::default(),
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("video.yuv.bind_group_layout"),
+            entries: &[
+                plane_entry(0),
+                plane_entry(1),
+                plane_entry(2),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
                 },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        // The shader premultiplies, and this matches what the
-                        // rest of iced draws with.
-                        blend: Some(
-                            wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-                        ),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options:
-                        wgpu::PipelineCompilationOptions::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    // No culling: the fullscreen triangle's winding is
-                    // whatever the vertex index maths produces.
-                    ..Default::default()
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    // The vertex stage reads scale/rotation, the fragment
+                    // stage reads the srgb flag.
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None,
-                cache: None,
-            });
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("video.yuv.pipeline_layout"),
+            bind_group_layouts: &[&layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("video.yuv.pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    // The shader premultiplies, and this matches what the
+                    // rest of iced draws with.
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                // No culling: the fullscreen triangle's winding is
+                // whatever the vertex index maths produces.
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("video.yuv.sampler"),
@@ -230,21 +215,15 @@ impl VideoPipeline {
         true
     }
 
-    fn allocate(
-        &self,
-        device: &wgpu::Device,
-        size: (u32, u32),
-        buffer: &I420Buffer,
-    ) -> Planes {
+    fn allocate(&self, device: &wgpu::Device, size: (u32, u32), buffer: &I420Buffer) -> Planes {
         let chroma = (buffer.chroma_width(), buffer.chroma_height());
 
         let y = create_plane(device, "video.yuv.plane.y", size);
         let u = create_plane(device, "video.yuv.plane.u", chroma);
         let v = create_plane(device, "video.yuv.plane.v", chroma);
 
-        let view = |texture: &wgpu::Texture| {
-            texture.create_view(&wgpu::TextureViewDescriptor::default())
-        };
+        let view =
+            |texture: &wgpu::Texture| texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("video.yuv.bind_group"),
@@ -296,11 +275,7 @@ const fn plane_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-fn create_plane(
-    device: &wgpu::Device,
-    label: &str,
-    (width, height): (u32, u32),
-) -> wgpu::Texture {
+fn create_plane(device: &wgpu::Device, label: &str, (width, height): (u32, u32)) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
@@ -312,8 +287,7 @@ fn create_plane(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::R8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_DST,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     })
 }
