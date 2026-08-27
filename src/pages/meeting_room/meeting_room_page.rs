@@ -5,7 +5,7 @@ use iced::futures::{
     FutureExt, SinkExt, Stream, StreamExt, select, stream, stream::FuturesUnordered,
     stream::SelectAll,
 };
-use iced::widget::{container, shader, stack, text};
+use iced::widget::{container, row, shader, stack, text};
 use iced::{Element, Length, Subscription, padding};
 use livekit::id::TrackSid;
 use livekit::options::TrackPublishOptions;
@@ -27,6 +27,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 
+use super::meeting_chat::{MeetingChat, MeetingChatMessage};
 use super::meeting_controls::{MeetingControls, MeetingControlsMessage};
 use crate::audio::audio_sink::AudioSink;
 use crate::audio::audio_source::AudioSource;
@@ -64,6 +65,7 @@ pub enum MeetingRoomMessage {
     LocalFrame(Frame),
     RemoteVideoEnded,
     MeetingControls(MeetingControlsMessage),
+    MeetingChat(MeetingChatMessage),
     MicrophonePublished(LocalTrackPublication),
     CameraControl(watch::Sender<bool>),
 }
@@ -75,6 +77,7 @@ pub struct MeetingRoomPage {
     frame: Option<Frame>,
     local_frame: Option<Frame>,
     meeting_controls: MeetingControls,
+    meeting_chat: MeetingChat,
     microphone: Option<LocalTrackPublication>,
     camera_control: Option<watch::Sender<bool>>,
 }
@@ -88,6 +91,7 @@ impl MeetingRoomPage {
             frame: None,
             local_frame: None,
             meeting_controls: MeetingControls::new(),
+            meeting_chat: MeetingChat::new(),
             microphone: None,
             camera_control: None,
         }
@@ -112,7 +116,9 @@ impl MeetingRoomPage {
             }
         };
 
-        stack![
+        // The controls stay inside the stack so they track the video, not the
+        // video plus the chat panel.
+        let stage = stack![
             container(content)
                 .center_x(Length::Fill)
                 .center_y(Length::Fill),
@@ -124,8 +130,15 @@ impl MeetingRoomPage {
             .center_x(Length::Fill)
             .align_bottom(Length::Fill)
             .padding(padding::bottom(40))
-        ]
-        .into()
+        ];
+
+        row![stage]
+            .extend((!self.meeting_controls.chat_hidden).then(|| {
+                self.meeting_chat
+                    .view()
+                    .map(MeetingRoomMessage::MeetingChat)
+            }))
+            .into()
     }
 
     pub fn update(&mut self, message: MeetingRoomMessage) {
@@ -146,6 +159,7 @@ impl MeetingRoomPage {
                     self.local_frame = None;
                 }
             }
+            MeetingRoomMessage::MeetingChat(message) => self.meeting_chat.update(message),
             MeetingRoomMessage::MicrophonePublished(publication) => {
                 self.microphone = Some(publication);
                 self.apply_controls();
