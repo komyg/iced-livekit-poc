@@ -7,7 +7,6 @@ use iced::futures::{
 };
 use iced::widget::{container, row, shader, stack, text};
 use iced::{Element, Length, Subscription, padding};
-use livekit::data_stream::api::StreamReader;
 use livekit::id::TrackSid;
 use livekit::options::TrackPublishOptions;
 use livekit::publication::LocalTrackPublication;
@@ -302,14 +301,10 @@ fn camera_toggles(receiver: watch::Receiver<bool>) -> impl Stream<Item = bool> +
     })
 }
 
-/// The topic modern `LiveKit` clients (JS SDK v2+, current web UIs) use for
-/// chat over text streams. The legacy `ChatMessage` data packet is a separate
-/// mechanism those clients no longer listen to.
-const CHAT_TOPIC: &str = "lk.chat";
-
-/// `OpenVidu` Meet speaks neither of the above: its chat is a plain reliable
-/// data packet on this topic with a `{"message": "..."}` JSON payload. This is
-/// the protocol the product actually talks, so it is also what we send.
+/// The chat protocol `OpenVidu` Meet speaks: a reliable data packet on this
+/// topic with a `{"message": "..."}` JSON payload. Note this is neither of
+/// `LiveKit`'s own chat mechanisms (`lk.chat` text streams or the legacy
+/// `ChatMessage` packet) — clients talking those will not interop.
 const OPENVIDU_CHAT_TOPIC: &str = "chat";
 
 fn participant_label(name: String, identity: String) -> String {
@@ -527,57 +522,6 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                                     body,
                                 }))
                                 .await;
-                        }
-                        RoomEvent::TextStreamOpened { reader, topic, participant_identity } => {
-                            if topic == CHAT_TOPIC
-                                && let Some(reader) = reader.take()
-                            {
-                                let sender = room
-                                    .remote_participants()
-                                    .get(&participant_identity)
-                                    .map_or_else(
-                                        || participant_identity.0.clone(),
-                                        |p| participant_label(p.name(), p.identity().0),
-                                    );
-
-                                // Read off-loop: the stream only completes
-                                // once the sender closes it, and a stalled
-                                // sender must not freeze the room.
-                                let mut output = output.clone();
-                                tokio::spawn(async move {
-                                    match reader.read_all().await {
-                                        Ok(body) => {
-                                            let _ = output
-                                                .send(MeetingRoomMessage::ChatReceived(
-                                                    ChatEntry { sender, body },
-                                                ))
-                                                .await;
-                                        }
-                                        Err(error) => {
-                                            eprintln!("Chat stream failed: {error}");
-                                        }
-                                    }
-                                });
-                            }
-                        }
-                        // Legacy chat packets, still sent by older SDK
-                        // clients. Current web clients use text streams.
-                        RoomEvent::ChatMessage { message, participant } => {
-                            // Skip edits/deletions of earlier messages; the
-                            // log is append-only.
-                            if message.deleted != Some(true) && message.edit_timestamp.is_none() {
-                                let sender = participant.map_or_else(
-                                    || "Unknown".to_owned(),
-                                    |p| participant_label(p.name(), p.identity().0),
-                                );
-
-                                let _ = output
-                                    .send(MeetingRoomMessage::ChatReceived(ChatEntry {
-                                        sender,
-                                        body: message.message,
-                                    }))
-                                    .await;
-                            }
                         }
                         event => eprintln!("Room event: {event:?}"),
                     }
