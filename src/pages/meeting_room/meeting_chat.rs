@@ -1,11 +1,17 @@
-use iced::widget::{button, column, container, row, scrollable, svg, text, text_input};
-use iced::{Background, Center, Color, Element, Length, border};
+use iced::widget::{button, column, container, rich_text, row, scrollable, span, svg, text_input};
+use iced::{Background, Center, Color, Element, Font, Length, border, font, never};
 
 const PANEL_WIDTH: u32 = 320;
 
+#[derive(Debug, Clone)]
+pub struct ChatEntry {
+    pub sender: String,
+    pub body: String,
+}
+
 #[derive(Debug, Default)]
 pub struct MeetingChat {
-    messages: Vec<String>,
+    messages: Vec<ChatEntry>,
     draft: String,
 }
 
@@ -13,6 +19,12 @@ pub struct MeetingChat {
 pub enum MeetingChatMessage {
     DraftChanged(String),
     Send,
+}
+
+#[derive(Debug, Clone)]
+pub enum MeetingChatAction {
+    None,
+    Send(String),
 }
 
 impl MeetingChat {
@@ -27,7 +39,7 @@ impl MeetingChat {
         let can_send = !self.draft.trim().is_empty();
 
         let messages = scrollable(
-            column(self.messages.iter().map(|message| text(message).into()))
+            column(self.messages.iter().map(entry_view))
                 .spacing(8)
                 .width(Length::Fill),
         )
@@ -77,17 +89,37 @@ impl MeetingChat {
             .into()
     }
 
-    pub fn update(&mut self, message: MeetingChatMessage) {
+    pub fn update(&mut self, message: MeetingChatMessage) -> MeetingChatAction {
         match message {
             MeetingChatMessage::DraftChanged(draft) => self.draft = draft,
             MeetingChatMessage::Send => {
                 let message = self.draft.trim();
-
                 if !message.is_empty() {
-                    self.messages.push(message.to_owned());
+                    let message = message.to_owned();
                     self.draft.clear();
+
+                    return MeetingChatAction::Send(message);
                 }
             }
         }
+
+        MeetingChatAction::None
     }
+
+    pub fn push(&mut self, entry: ChatEntry) {
+        self.messages.push(entry);
+    }
+}
+
+fn entry_view(entry: &ChatEntry) -> Element<'_, MeetingChatMessage> {
+    rich_text![
+        span(format!("{}: ", entry.sender)).font(Font {
+            weight: font::Weight::Bold,
+            ..Font::DEFAULT
+        }),
+        span(entry.body.as_str()),
+    ]
+    // Pins the otherwise uninferable `Link` type; no span carries a link.
+    .on_link_click(never)
+    .into()
 }

@@ -15,6 +15,7 @@ livekit-api = "0.6.1"
 nokhwa = { version = "0.10.11", features = ["input-avfoundation"]}
 rtrb = "0.3.4"
 serde = "1.0.229"
+serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["sync"] }
 
 [dev-dependencies]

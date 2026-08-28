@@ -2111,6 +2111,7 @@ dependencies = [
  "nokhwa",
  "rtrb",
  "serde",
+ "serde_json",
  "tokio",
 ]
 

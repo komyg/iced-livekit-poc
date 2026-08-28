@@ -7,6 +7,7 @@ use iced::futures::{
 };
 use iced::widget::{container, row, shader, stack, text};
 use iced::{Element, Length, Subscription, padding};
+use livekit::data_stream::api::StreamReader;
 use livekit::id::TrackSid;
 use livekit::options::TrackPublishOptions;
 use livekit::publication::LocalTrackPublication;
@@ -22,12 +23,12 @@ use livekit::webrtc::video_frame::{I420Buffer, VideoBuffer, VideoFrame, VideoRot
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
 use livekit::webrtc::video_stream::native::NativeVideoStream;
-use livekit::{Room, RoomEvent, RoomOptions};
+use livekit::{DataPacket, Room, RoomEvent, RoomOptions};
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
 
-use super::meeting_chat::{MeetingChat, MeetingChatMessage};
+use super::meeting_chat::{ChatEntry, MeetingChat, MeetingChatAction, MeetingChatMessage};
 use super::meeting_controls::{MeetingControls, MeetingControlsMessage};
 use crate::audio::audio_sink::AudioSink;
 use crate::audio::audio_source::AudioSource;
@@ -68,6 +69,8 @@ pub enum MeetingRoomMessage {
     MeetingChat(MeetingChatMessage),
     MicrophonePublished(LocalTrackPublication),
     CameraControl(watch::Sender<bool>),
+    ChatControl(mpsc::UnboundedSender<String>),
+    ChatReceived(ChatEntry),
 }
 
 pub struct MeetingRoomPage {
@@ -80,6 +83,7 @@ pub struct MeetingRoomPage {
     meeting_chat: MeetingChat,
     microphone: Option<LocalTrackPublication>,
     camera_control: Option<watch::Sender<bool>>,
+    chat_control: Option<mpsc::UnboundedSender<String>>,
 }
 
 impl MeetingRoomPage {
@@ -94,6 +98,7 @@ impl MeetingRoomPage {
             meeting_chat: MeetingChat::new(),
             microphone: None,
             camera_control: None,
+            chat_control: None,
         }
     }
 
@@ -159,7 +164,16 @@ impl MeetingRoomPage {
                     self.local_frame = None;
                 }
             }
-            MeetingRoomMessage::MeetingChat(message) => self.meeting_chat.update(message),
+            MeetingRoomMessage::MeetingChat(message) => {
+                if let MeetingChatAction::Send(text) = self.meeting_chat.update(message)
+                    && let Some(chat) = &self.chat_control
+                    && chat.send(text).is_err()
+                {
+                    eprintln!("Chat unavailable: room loop is gone");
+                }
+            }
+            MeetingRoomMessage::ChatReceived(entry) => self.meeting_chat.push(entry),
+            MeetingRoomMessage::ChatControl(sender) => self.chat_control = Some(sender),
             MeetingRoomMessage::MicrophonePublished(publication) => {
                 self.microphone = Some(publication);
                 self.apply_controls();
@@ -288,6 +302,20 @@ fn camera_toggles(receiver: watch::Receiver<bool>) -> impl Stream<Item = bool> +
     })
 }
 
+/// The topic modern `LiveKit` clients (JS SDK v2+, current web UIs) use for
+/// chat over text streams. The legacy `ChatMessage` data packet is a separate
+/// mechanism those clients no longer listen to.
+const CHAT_TOPIC: &str = "lk.chat";
+
+/// `OpenVidu` Meet speaks neither of the above: its chat is a plain reliable
+/// data packet on this topic with a `{"message": "..."}` JSON payload. This is
+/// the protocol the product actually talks, so it is also what we send.
+const OPENVIDU_CHAT_TOPIC: &str = "chat";
+
+fn participant_label(name: String, identity: String) -> String {
+    if name.is_empty() { identity } else { name }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one `select!` loop over the room's lifetime; splitting the arms \
@@ -357,6 +385,17 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
         let _ = output
             .send(MeetingRoomMessage::CameraControl(camera_tx))
             .await;
+
+        let (chat_tx, chat_rx) = mpsc::unbounded_channel::<String>();
+        let mut chat_requests = stream::unfold(chat_rx, async |mut receiver| {
+            let text = receiver.recv().await?;
+
+            Some((text, receiver))
+        })
+        .boxed()
+        .fuse();
+
+        let _ = output.send(MeetingRoomMessage::ChatControl(chat_tx)).await;
 
         // Don't block while waiting for the camera to open.
         let mut camera_source = match tokio::task::spawn_blocking(VideoSource::new).await {
@@ -461,6 +500,84 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                         }
                         RoomEvent::TrackSubscriptionFailed { error, track_sid, .. } => {
                             eprintln!("Track subscription failed for {track_sid}: {error}");
+                        }
+                        RoomEvent::DataReceived { payload, topic: Some(topic), participant, .. }
+                            if topic == OPENVIDU_CHAT_TOPIC =>
+                        {
+                            // OpenVidu Meet chat: JSON `{"message": "..."}`.
+                            let body = serde_json::from_slice::<serde_json::Value>(&payload)
+                                .ok()
+                                .and_then(|value| {
+                                    value.get("message")?.as_str().map(ToOwned::to_owned)
+                                });
+
+                            let Some(body) = body else {
+                                eprintln!("Unrecognized chat payload on topic {topic:?}");
+                                continue;
+                            };
+
+                            let sender = participant.map_or_else(
+                                || "Unknown".to_owned(),
+                                |p| participant_label(p.name(), p.identity().0),
+                            );
+
+                            let _ = output
+                                .send(MeetingRoomMessage::ChatReceived(ChatEntry {
+                                    sender,
+                                    body,
+                                }))
+                                .await;
+                        }
+                        RoomEvent::TextStreamOpened { reader, topic, participant_identity } => {
+                            if topic == CHAT_TOPIC
+                                && let Some(reader) = reader.take()
+                            {
+                                let sender = room
+                                    .remote_participants()
+                                    .get(&participant_identity)
+                                    .map_or_else(
+                                        || participant_identity.0.clone(),
+                                        |p| participant_label(p.name(), p.identity().0),
+                                    );
+
+                                // Read off-loop: the stream only completes
+                                // once the sender closes it, and a stalled
+                                // sender must not freeze the room.
+                                let mut output = output.clone();
+                                tokio::spawn(async move {
+                                    match reader.read_all().await {
+                                        Ok(body) => {
+                                            let _ = output
+                                                .send(MeetingRoomMessage::ChatReceived(
+                                                    ChatEntry { sender, body },
+                                                ))
+                                                .await;
+                                        }
+                                        Err(error) => {
+                                            eprintln!("Chat stream failed: {error}");
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        // Legacy chat packets, still sent by older SDK
+                        // clients. Current web clients use text streams.
+                        RoomEvent::ChatMessage { message, participant } => {
+                            // Skip edits/deletions of earlier messages; the
+                            // log is append-only.
+                            if message.deleted != Some(true) && message.edit_timestamp.is_none() {
+                                let sender = participant.map_or_else(
+                                    || "Unknown".to_owned(),
+                                    |p| participant_label(p.name(), p.identity().0),
+                                );
+
+                                let _ = output
+                                    .send(MeetingRoomMessage::ChatReceived(ChatEntry {
+                                        sender,
+                                        body: message.message,
+                                    }))
+                                    .await;
+                            }
                         }
                         event => eprintln!("Room event: {event:?}"),
                     }
@@ -603,6 +720,35 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
 
                     // So the first-frame log below reports the restart too.
                     local_frames = 0;
+                }
+                text = chat_requests.next() => {
+                    let Some(text) = text else { continue };
+
+                    let packet = DataPacket {
+                        payload: serde_json::json!({ "message": text })
+                            .to_string()
+                            .into_bytes(),
+                        topic: Some(OPENVIDU_CHAT_TOPIC.to_owned()),
+                        reliable: true,
+                        destination_identities: Vec::new(),
+                    };
+
+                    // The message is only shown once the server accepted it,
+                    // so the log never contains anything that wasn't
+                    // delivered. LiveKit does not echo our own packet back.
+                    match room.local_participant().publish_data(packet).await {
+                        Ok(()) => {
+                            let local = room.local_participant();
+
+                            let _ = output
+                                .send(MeetingRoomMessage::ChatReceived(ChatEntry {
+                                    sender: participant_label(local.name(), local.identity().0),
+                                    body: text,
+                                }))
+                                .await;
+                        }
+                        Err(error) => eprintln!("Chat send failed: {error}"),
+                    }
                 }
                 _ = ticker.tick().fuse() => {
                     let (Some(source), Some((rtc, buffer))) = (&mut audio_source, &mut mic)
