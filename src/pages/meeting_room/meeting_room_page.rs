@@ -34,6 +34,12 @@ use crate::audio::audio_source::AudioSource;
 use crate::video::video_sink::{Frame, VideoSink, to_i420};
 use crate::video::video_source::VideoSource;
 
+/// The chat protocol `OpenVidu` Meet speaks: a reliable data packet on this
+/// topic with a `{"message": "..."}` JSON payload. Note this is neither of
+/// `LiveKit`'s own chat mechanisms (`lk.chat` text streams or the legacy
+/// `ChatMessage` packet) — clients talking those will not interop.
+const OPENVIDU_CHAT_TOPIC: &str = "chat";
+
 #[derive(Debug, Clone)]
 pub enum Status {
     Connecting,
@@ -301,12 +307,6 @@ fn camera_toggles(receiver: watch::Receiver<bool>) -> impl Stream<Item = bool> +
     })
 }
 
-/// The chat protocol `OpenVidu` Meet speaks: a reliable data packet on this
-/// topic with a `{"message": "..."}` JSON payload. Note this is neither of
-/// `LiveKit`'s own chat mechanisms (`lk.chat` text streams or the legacy
-/// `ChatMessage` packet) — clients talking those will not interop.
-const OPENVIDU_CHAT_TOPIC: &str = "chat";
-
 fn participant_label(name: String, identity: String) -> String {
     if name.is_empty() { identity } else { name }
 }
@@ -384,7 +384,6 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
         let (chat_tx, chat_rx) = mpsc::unbounded_channel::<String>();
         let mut chat_requests = stream::unfold(chat_rx, async |mut receiver| {
             let text = receiver.recv().await?;
-
             Some((text, receiver))
         })
         .boxed()
@@ -434,6 +433,7 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                 event = events.recv().fuse() => {
                     let Some(event) = event else { break };
 
+                    eprintln!("Room event: {event:#?}");
                     match event {
                         RoomEvent::TrackSubscribed {
                             track: RemoteTrack::Video(track),
@@ -523,7 +523,7 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                                 }))
                                 .await;
                         }
-                        event => eprintln!("Room event: {event:?}"),
+                        _ => {}
                     }
                 }
                 frame = videos.next() => {
