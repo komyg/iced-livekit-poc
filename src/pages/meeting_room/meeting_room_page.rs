@@ -6,7 +6,7 @@ use iced::futures::{
     stream::SelectAll,
 };
 use iced::widget::{container, row, shader, stack, text};
-use iced::{Element, Length, Subscription, padding};
+use iced::{Element, Length, Subscription, Task, padding};
 use livekit::id::TrackSid;
 use livekit::options::TrackPublishOptions;
 use livekit::publication::LocalTrackPublication;
@@ -27,6 +27,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
 
+use super::chat_notification::{ChatNotification, ChatNotificationAction, ChatNotificationMessage};
 use super::meeting_chat::{ChatEntry, MeetingChat, MeetingChatAction, MeetingChatMessage};
 use super::meeting_controls::{MeetingControls, MeetingControlsMessage};
 use crate::audio::audio_sink::AudioSink;
@@ -72,6 +73,7 @@ pub enum MeetingRoomMessage {
     RemoteVideoEnded,
     MeetingControls(MeetingControlsMessage),
     MeetingChat(MeetingChatMessage),
+    ChatNotification(ChatNotificationMessage),
     MicrophonePublished(LocalTrackPublication),
     CameraControl(watch::Sender<bool>),
     ChatControl(mpsc::UnboundedSender<String>),
@@ -86,6 +88,7 @@ pub struct MeetingRoomPage {
     local_frame: Option<Frame>,
     meeting_controls: MeetingControls,
     meeting_chat: MeetingChat,
+    chat_notification: ChatNotification,
     microphone: Option<LocalTrackPublication>,
     camera_control: Option<watch::Sender<bool>>,
     chat_control: Option<mpsc::UnboundedSender<String>>,
@@ -101,6 +104,7 @@ impl MeetingRoomPage {
             local_frame: None,
             meeting_controls: MeetingControls::new(),
             meeting_chat: MeetingChat::new(),
+            chat_notification: ChatNotification::new(),
             microphone: None,
             camera_control: None,
             chat_control: None,
@@ -126,8 +130,6 @@ impl MeetingRoomPage {
             }
         };
 
-        // The controls stay inside the stack so they track the video, not the
-        // video plus the chat panel.
         let stage = stack![
             container(content)
                 .center_x(Length::Fill)
@@ -140,7 +142,14 @@ impl MeetingRoomPage {
             .center_x(Length::Fill)
             .align_bottom(Length::Fill)
             .padding(padding::bottom(40))
-        ];
+        ]
+        .extend(self.chat_notification.view().map(|toast| {
+            container(toast.map(MeetingRoomMessage::ChatNotification))
+                .center_x(Length::Fill)
+                .align_bottom(Length::Fill)
+                .padding(padding::bottom(110))
+                .into()
+        }));
 
         row![stage]
             .extend((!self.meeting_controls.chat_hidden).then(|| {
@@ -151,7 +160,7 @@ impl MeetingRoomPage {
             .into()
     }
 
-    pub fn update(&mut self, message: MeetingRoomMessage) {
+    pub fn update(&mut self, message: MeetingRoomMessage) -> Task<MeetingRoomMessage> {
         match message {
             MeetingRoomMessage::Status(status) => self.status = status,
             MeetingRoomMessage::Frame(frame) => self.frame = Some(frame),
@@ -168,6 +177,10 @@ impl MeetingRoomPage {
                 if self.meeting_controls.camera_off {
                     self.local_frame = None;
                 }
+
+                if !self.meeting_controls.chat_hidden {
+                    self.chat_notification.dismiss();
+                }
             }
             MeetingRoomMessage::MeetingChat(message) => {
                 if let MeetingChatAction::Send(text) = self.meeting_chat.update(message)
@@ -177,7 +190,27 @@ impl MeetingRoomPage {
                     eprintln!("Chat unavailable: room loop is gone");
                 }
             }
-            MeetingRoomMessage::ChatReceived(entry) => self.meeting_chat.push(entry),
+            MeetingRoomMessage::ChatNotification(message) => {
+                match self.chat_notification.update(message) {
+                    ChatNotificationAction::OpenChat => {
+                        self.meeting_controls
+                            .update(MeetingControlsMessage::ToggleChat);
+                        self.chat_notification.dismiss();
+                    }
+                    ChatNotificationAction::Run(task) => {
+                        return task.map(MeetingRoomMessage::ChatNotification);
+                    }
+                    ChatNotificationAction::None => {}
+                }
+            }
+            MeetingRoomMessage::ChatReceived(entry) => {
+                self.meeting_chat.push(entry.clone());
+                if self.meeting_controls.chat_hidden {
+                    return self.update(MeetingRoomMessage::ChatNotification(
+                        ChatNotificationMessage::Show(entry),
+                    ));
+                }
+            }
             MeetingRoomMessage::ChatControl(sender) => self.chat_control = Some(sender),
             MeetingRoomMessage::MicrophonePublished(publication) => {
                 self.microphone = Some(publication);
@@ -188,6 +221,8 @@ impl MeetingRoomPage {
                 self.apply_controls();
             }
         }
+
+        Task::none()
     }
 
     fn apply_controls(&self) {

@@ -3,7 +3,7 @@ mod common;
 mod pages;
 mod video;
 
-use iced::{Element, Subscription};
+use iced::{Element, Subscription, Task};
 use pages::login::LoginPage;
 use pages::meeting_room::MeetingRoomPage;
 
@@ -26,11 +26,11 @@ enum Message {
     MeetingRoom(MeetingRoomMessage),
 }
 
-fn update(screen: &mut Screen, message: Message) {
+fn update(screen: &mut Screen, message: Message) -> Task<Message> {
     match message {
         Message::Login(message) => {
             let Screen::Login(page) = screen else {
-                return;
+                return Task::none();
             };
 
             match page.update(message) {
@@ -44,12 +44,14 @@ fn update(screen: &mut Screen, message: Message) {
         }
         Message::MeetingRoom(message) => {
             let Screen::MeetingRoom(page) = screen else {
-                return;
+                return Task::none();
             };
 
-            page.update(message);
+            return page.update(message).map(Message::MeetingRoom);
         }
     }
+
+    Task::none()
 }
 
 fn view(screen: &Screen) -> Element<'_, Message> {
