@@ -7,7 +7,7 @@ use iced::futures::{
 };
 use iced::widget::{container, row, shader, stack, text};
 use iced::{Element, Length, Subscription, Task, padding};
-use livekit::id::TrackSid;
+use livekit::id::{ParticipantIdentity, TrackSid};
 use livekit::options::TrackPublishOptions;
 use livekit::publication::LocalTrackPublication;
 use livekit::track::RemoteTrack;
@@ -28,7 +28,10 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
 
 use super::chat_notification::{ChatNotification, ChatNotificationAction, ChatNotificationMessage};
-use super::meeting_chat::{ChatEntry, MeetingChat, MeetingChatAction, MeetingChatMessage};
+use super::meeting_chat::{
+    ChatEntry, ChatRequest, EVERYONE_ID, MeetingChat, MeetingChatAction, MeetingChatMessage,
+    Recipient, Roster,
+};
 use super::meeting_controls::{MeetingControls, MeetingControlsMessage};
 use crate::audio::audio_sink::AudioSink;
 use crate::audio::audio_source::AudioSource;
@@ -76,7 +79,7 @@ pub enum MeetingRoomMessage {
     ChatNotification(ChatNotificationMessage),
     MicrophonePublished(LocalTrackPublication),
     CameraControl(watch::Sender<bool>),
-    ChatControl(mpsc::UnboundedSender<String>),
+    ChatControl(mpsc::UnboundedSender<ChatRequest>),
     ChatReceived(ChatEntry),
 }
 
@@ -91,11 +94,11 @@ pub struct MeetingRoomPage {
     chat_notification: ChatNotification,
     microphone: Option<LocalTrackPublication>,
     camera_control: Option<watch::Sender<bool>>,
-    chat_control: Option<mpsc::UnboundedSender<String>>,
+    chat_control: Option<mpsc::UnboundedSender<ChatRequest>>,
 }
 
 impl MeetingRoomPage {
-    pub const fn new(token: String, url: String) -> Self {
+    pub fn new(token: String, url: String) -> Self {
         Self {
             token,
             url,
@@ -183,9 +186,9 @@ impl MeetingRoomPage {
                 }
             }
             MeetingRoomMessage::MeetingChat(message) => {
-                if let MeetingChatAction::Send(text) = self.meeting_chat.update(message)
+                if let MeetingChatAction::Send(request) = self.meeting_chat.update(message)
                     && let Some(chat) = &self.chat_control
-                    && chat.send(text).is_err()
+                    && chat.send(request).is_err()
                 {
                     eprintln!("Chat unavailable: room loop is gone");
                 }
@@ -346,6 +349,19 @@ fn participant_label(name: String, identity: String) -> String {
     if name.is_empty() { identity } else { name }
 }
 
+/// Adapts `LiveKit`'s participant map into the shape the chat panel wants.
+fn roster_of(room: &Room) -> Roster {
+    room.remote_participants()
+        .into_iter()
+        .map(|(identity, participant)| {
+            (
+                identity.0,
+                participant_label(participant.name(), participant.identity().0),
+            )
+        })
+        .collect()
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one `select!` loop over the room's lifetime; splitting the arms \
@@ -374,6 +390,15 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
         };
 
         let _ = output.send(MeetingRoomMessage::Status(Status::Live)).await;
+
+        // Anyone already here when we arrived fires no `ParticipantConnected`,
+        // so the roster has to start from a snapshot rather than from events.
+        let mut roster = roster_of(&room);
+        let _ = output
+            .send(MeetingRoomMessage::MeetingChat(
+                MeetingChatMessage::ParticipantsChanged(roster.clone()),
+            ))
+            .await;
 
         let mut videos: SelectAll<NativeVideoStream> = SelectAll::new();
         let mut audio: SelectAll<NativeAudioStream> = SelectAll::new();
@@ -416,10 +441,10 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
             .send(MeetingRoomMessage::CameraControl(camera_tx))
             .await;
 
-        let (chat_tx, chat_rx) = mpsc::unbounded_channel::<String>();
+        let (chat_tx, chat_rx) = mpsc::unbounded_channel::<ChatRequest>();
         let mut chat_requests = stream::unfold(chat_rx, async |mut receiver| {
-            let text = receiver.recv().await?;
-            Some((text, receiver))
+            let request = receiver.recv().await?;
+            Some((request, receiver))
         })
         .boxed()
         .fuse();
@@ -519,6 +544,58 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                             let _ = output
                                 .send(MeetingRoomMessage::Status(Status::Live))
                                 .await;
+
+                            // Joins and leaves that happened while we were down
+                            // produced no events we could see, so trust the
+                            // room over our accumulated roster.
+                            roster = roster_of(&room);
+                            let _ = output
+                                .send(MeetingRoomMessage::MeetingChat(
+                                    MeetingChatMessage::ParticipantsChanged(roster.clone()),
+                                    ))
+                                .await;
+                        }
+                        RoomEvent::ParticipantConnected(participant) => {
+                            roster.insert(
+                                participant.identity().0,
+                                participant_label(
+                                    participant.name(),
+                                    participant.identity().0,
+                                ),
+                            );
+
+                            let _ = output
+                                .send(MeetingRoomMessage::MeetingChat(
+                                    MeetingChatMessage::ParticipantsChanged(roster.clone()),
+                                    ))
+                                .await;
+                        }
+                        RoomEvent::ParticipantDisconnected(participant) => {
+                            roster.remove(&participant.identity().0);
+
+                            let _ = output
+                                .send(MeetingRoomMessage::MeetingChat(
+                                    MeetingChatMessage::ParticipantsChanged(roster.clone()),
+                                    ))
+                                .await;
+                        }
+                        RoomEvent::ParticipantNameChanged { participant, name, .. } => {
+                            let identity = participant.identity().0;
+
+                            // Only ever tracks remotes; a rename on ourselves
+                            // must not add us to our own recipient list.
+                            if roster.contains_key(&identity) {
+                                roster.insert(
+                                    identity.clone(),
+                                    participant_label(name, identity),
+                                );
+
+                                let _ = output
+                                    .send(MeetingRoomMessage::MeetingChat(
+                                        MeetingChatMessage::ParticipantsChanged(roster.clone()),
+                                        ))
+                                    .await;
+                            }
                         }
                         RoomEvent::Disconnected { reason } => {
                             let _ = output
@@ -534,16 +611,46 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                         RoomEvent::DataReceived { payload, topic: Some(topic), participant, .. }
                             if topic == OPENVIDU_CHAT_TOPIC =>
                         {
-                            // OpenVidu Meet chat: JSON `{"message": "..."}`.
-                            let body = serde_json::from_slice::<serde_json::Value>(&payload)
-                                .ok()
-                                .and_then(|value| {
-                                    value.get("message")?.as_str().map(ToOwned::to_owned)
-                                });
+                            // OpenVidu Meet chat, plus our own `to` extension:
+                            // JSON `{"message": "...", "to": "<identity>"}`.
+                            let payload =
+                                serde_json::from_slice::<serde_json::Value>(&payload).ok();
+
+                            let body = payload.as_ref().and_then(|value| {
+                                value.get("message")?.as_str().map(ToOwned::to_owned)
+                            });
 
                             let Some(body) = body else {
                                 eprintln!("Unrecognized chat payload on topic {topic:?}");
                                 continue;
+                            };
+
+                            let to = payload
+                                .as_ref()
+                                .and_then(|value| value.get("to")?.as_str())
+                                .filter(|to| !to.is_empty())
+                                .unwrap_or(EVERYONE_ID);
+
+                            let local = room.local_participant();
+                            let addressed_to_us = to == local.identity().0;
+
+                            // Targeted packets already reach only their
+                            // recipient, so this is a backstop against a client
+                            // that sets `to` but still broadcasts.
+                            if to != EVERYONE_ID && !addressed_to_us {
+                                continue;
+                            }
+
+                            let recipient = if addressed_to_us {
+                                Recipient {
+                                    id: local.identity().0,
+                                    label: participant_label(
+                                        local.name(),
+                                        local.identity().0,
+                                    ),
+                                }
+                            } else {
+                                Recipient::everyone()
                             };
 
                             let sender = participant.map_or_else(
@@ -554,6 +661,7 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                             let _ = output
                                 .send(MeetingRoomMessage::ChatReceived(ChatEntry {
                                     sender,
+                                    recipient,
                                     body,
                                 }))
                                 .await;
@@ -700,16 +808,27 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                     // So the first-frame log below reports the restart too.
                     local_frames = 0;
                 }
-                text = chat_requests.next() => {
-                    let Some(text) = text else { continue };
+                request = chat_requests.next() => {
+                    let Some(request) = request else { continue };
 
                     let packet = DataPacket {
-                        payload: serde_json::json!({ "message": text })
+                        // `to` is carried in the payload because the receiver
+                        // never sees `destination_identities` — that is routing
+                        // the server consumes — and it has to know whether the
+                        // message was private in order to label it.
+                        payload: serde_json::json!({
+                            "message": request.body,
+                            "to": request.recipient.id,
+                        })
                             .to_string()
                             .into_bytes(),
                         topic: Some(OPENVIDU_CHAT_TOPIC.to_owned()),
                         reliable: true,
-                        destination_identities: Vec::new(),
+                        destination_identities: if request.recipient.is_everyone() {
+                            Vec::new()
+                        } else {
+                            vec![ParticipantIdentity(request.recipient.id.clone())]
+                        },
                     };
 
                     // The message is only shown once the server accepted it,
@@ -722,7 +841,8 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                             let _ = output
                                 .send(MeetingRoomMessage::ChatReceived(ChatEntry {
                                     sender: participant_label(local.name(), local.identity().0),
-                                    body: text,
+                                    recipient: request.recipient,
+                                    body: request.body,
                                 }))
                                 .await;
                         }

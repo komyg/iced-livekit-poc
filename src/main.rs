@@ -10,6 +10,12 @@ use pages::meeting_room::MeetingRoomPage;
 use crate::pages::login::{LoginPageAction, LoginPageMessage};
 use crate::pages::meeting_room::MeetingRoomMessage;
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "iced owns the single `Screen` inside its own pinned future, so the \
+              meeting room is heap-resident either way; boxing it would only add \
+              an allocation and a pointer hop."
+)]
 enum Screen {
     Login(LoginPage),
     MeetingRoom(MeetingRoomPage),

@@ -40,7 +40,7 @@ impl ChatNotification {
         let (_, entry) = self.showing.as_ref()?;
 
         let preview = rich_text![
-            span(format!("{}: ", entry.sender)).font(Font {
+            span(entry.header()).font(Font {
                 weight: font::Weight::Bold,
                 ..Font::DEFAULT
             }),
