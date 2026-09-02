@@ -6,6 +6,7 @@ pub struct MeetingControls {
     pub microphone_muted: bool,
     pub camera_off: bool,
     pub chat_hidden: bool,
+    pub mosaic_on: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -13,6 +14,7 @@ pub enum MeetingControlsMessage {
     ToggleMicrophone,
     ToggleCamera,
     ToggleChat,
+    ToggleMosaic,
 }
 
 impl MeetingControls {
@@ -21,6 +23,7 @@ impl MeetingControls {
             microphone_muted: false,
             camera_off: false,
             chat_hidden: true,
+            mosaic_on: false,
         }
     }
 
@@ -55,10 +58,21 @@ impl MeetingControls {
             )
         };
 
+        let mosaic_icon = if self.mosaic_on {
+            svg::Handle::from_memory(
+                include_bytes!("../../../assets/square-regular-full.svg").as_slice(),
+            )
+        } else {
+            svg::Handle::from_memory(
+                include_bytes!("../../../assets/table-cells-large-solid-full.svg").as_slice(),
+            )
+        };
+
         row![
             control_button(microphone_icon, MeetingControlsMessage::ToggleMicrophone),
             control_button(camera_icon, MeetingControlsMessage::ToggleCamera),
             control_button(chat_icon, MeetingControlsMessage::ToggleChat),
+            control_button(mosaic_icon, MeetingControlsMessage::ToggleMosaic),
         ]
         .spacing(12)
         .into()
@@ -74,6 +88,9 @@ impl MeetingControls {
             }
             MeetingControlsMessage::ToggleChat => {
                 self.chat_hidden = !self.chat_hidden;
+            }
+            MeetingControlsMessage::ToggleMosaic => {
+                self.mosaic_on = !self.mosaic_on;
             }
         }
     }
