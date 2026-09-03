@@ -3,38 +3,10 @@ use iced::widget::{
 };
 use iced::{Background, Center, Color, Element, Font, Length, border, font, never};
 use std::collections::HashMap;
-use std::fmt;
+
+use super::data::{EVERYONE_ID, Recipient, Roster};
 
 const PANEL_WIDTH: u32 = 320;
-
-pub const EVERYONE_ID: &str = "__everyone__";
-
-pub type Roster = HashMap<String, String>;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Recipient {
-    pub id: String,
-    pub label: String,
-}
-
-impl Recipient {
-    pub fn everyone() -> Self {
-        Self {
-            id: EVERYONE_ID.to_owned(),
-            label: "Send to Everyone".to_owned(),
-        }
-    }
-
-    pub fn is_everyone(&self) -> bool {
-        self.id == EVERYONE_ID
-    }
-}
-
-impl fmt::Display for Recipient {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.label)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct ChatEntry {

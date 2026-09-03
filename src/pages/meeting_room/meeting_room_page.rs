@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use iced::futures::stream::BoxStream;
+use iced::futures::channel::mpsc::Sender;
+use iced::futures::stream::{AbortHandle, BoxStream};
 use iced::futures::{
     FutureExt, SinkExt, Stream, StreamExt, select, stream, stream::FuturesUnordered,
     stream::SelectAll,
@@ -9,16 +11,19 @@ use iced::widget::{container, row, shader, stack, text};
 use iced::{Element, Length, Subscription, Task, padding};
 use livekit::id::{ParticipantIdentity, TrackSid};
 use livekit::options::TrackPublishOptions;
+use livekit::participant::Participant;
 use livekit::publication::LocalTrackPublication;
 use livekit::track::RemoteTrack;
 use livekit::track::TrackSource;
-use livekit::track::{LocalAudioTrack, LocalTrack, LocalVideoTrack};
+use livekit::track::{LocalAudioTrack, LocalTrack, LocalVideoTrack, TrackKind};
 use livekit::webrtc::audio_frame::AudioFrame;
 use livekit::webrtc::audio_source::AudioSourceOptions;
 use livekit::webrtc::audio_source::RtcAudioSource;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
-use livekit::webrtc::video_frame::{I420Buffer, VideoBuffer, VideoFrame, VideoRotation};
+use livekit::webrtc::video_frame::{
+    BoxVideoFrame, I420Buffer, VideoBuffer, VideoFrame, VideoRotation,
+};
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
 use livekit::webrtc::video_stream::native::NativeVideoStream;
@@ -28,11 +33,12 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
 
 use super::chat_notification::{ChatNotification, ChatNotificationAction, ChatNotificationMessage};
+use super::data::{EVERYONE_ID, Recipient, Roster};
 use super::meeting_chat::{
-    ChatEntry, ChatRequest, EVERYONE_ID, MeetingChat, MeetingChatAction, MeetingChatMessage,
-    Recipient, Roster,
+    ChatEntry, ChatRequest, MeetingChat, MeetingChatAction, MeetingChatMessage,
 };
 use super::meeting_controls::{MeetingControls, MeetingControlsMessage};
+use super::mosaic::{self, Tile};
 use crate::audio::audio_sink::AudioSink;
 use crate::audio::audio_source::AudioSource;
 use crate::video::video_sink::{Frame, VideoSink, to_i420};
@@ -71,9 +77,15 @@ impl Status {
 #[derive(Debug, Clone)]
 pub enum MeetingRoomMessage {
     Status(Status),
-    Frame(Frame),
-    LocalFrame(Frame),
-    RemoteVideoEnded,
+    Frame {
+        identity: String,
+        frame: Frame,
+    },
+    VideoEnded(String),
+    Participants {
+        local: (String, String),
+        remote: Roster,
+    },
     MeetingControls(MeetingControlsMessage),
     MeetingChat(MeetingChatMessage),
     ChatNotification(ChatNotificationMessage),
@@ -87,8 +99,11 @@ pub struct MeetingRoomPage {
     token: String,
     url: String,
     status: Status,
-    frame: Option<Frame>,
-    local_frame: Option<Frame>,
+    /// Our own (identity, label); `None` until the room loop reports in.
+    local: Option<(String, String)>,
+    roster: Roster,
+    /// Latest frame per participant identity, ours included.
+    frames: HashMap<String, Frame>,
     meeting_controls: MeetingControls,
     meeting_chat: MeetingChat,
     chat_notification: ChatNotification,
@@ -103,8 +118,9 @@ impl MeetingRoomPage {
             token,
             url,
             status: Status::Connecting,
-            frame: None,
-            local_frame: None,
+            local: None,
+            roster: Roster::new(),
+            frames: HashMap::new(),
             meeting_controls: MeetingControls::new(),
             meeting_chat: MeetingChat::new(),
             chat_notification: ChatNotification::new(),
@@ -115,22 +131,19 @@ impl MeetingRoomPage {
     }
 
     pub fn view(&self) -> Element<'_, MeetingRoomMessage> {
-        let displayed = self.frame.as_ref().or(self.local_frame.as_ref());
+        let tiles = mosaic::ordered_tiles(self.local.as_ref(), &self.roster, &self.frames);
 
-        let content: Element<'_, MeetingRoomMessage> = match displayed {
-            Some(frame) if !self.status.is_error() => shader(VideoSink::new(frame.clone()))
+        let content: Element<'_, MeetingRoomMessage> = if self.status.is_error() {
+            text(self.status.label()).style(text::danger).into()
+        } else if self.meeting_controls.mosaic_on && !tiles.is_empty() {
+            mosaic::view(tiles)
+        } else if let Some((identity, frame)) = featured(&tiles) {
+            shader(VideoSink::new(identity, frame.clone()))
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .into(),
-            _ => {
-                let label = text(self.status.label());
-
-                if self.status.is_error() {
-                    label.style(text::danger).into()
-                } else {
-                    label.into()
-                }
-            }
+                .into()
+        } else {
+            text(self.status.label()).into()
         };
 
         let stage = stack![
@@ -166,19 +179,33 @@ impl MeetingRoomPage {
     pub fn update(&mut self, message: MeetingRoomMessage) -> Task<MeetingRoomMessage> {
         match message {
             MeetingRoomMessage::Status(status) => self.status = status,
-            MeetingRoomMessage::Frame(frame) => self.frame = Some(frame),
-            MeetingRoomMessage::RemoteVideoEnded => self.frame = None,
-            MeetingRoomMessage::LocalFrame(frame) => {
-                if !self.meeting_controls.camera_off {
-                    self.local_frame = Some(frame);
+            MeetingRoomMessage::Frame { identity, frame } => {
+                // A frame already in flight when the camera was switched off
+                // must not resurrect our tile.
+                let ours = self.is_local(&identity);
+                if !(ours && self.meeting_controls.camera_off) {
+                    self.frames.insert(identity, frame);
                 }
+            }
+            MeetingRoomMessage::VideoEnded(identity) => {
+                self.frames.remove(&identity);
+            }
+            MeetingRoomMessage::Participants { local, remote } => {
+                self.frames
+                    .retain(|identity, _| *identity == local.0 || remote.contains_key(identity));
+                self.local = Some(local);
+                self.meeting_chat
+                    .update(MeetingChatMessage::ParticipantsChanged(remote.clone()));
+                self.roster = remote;
             }
             MeetingRoomMessage::MeetingControls(message) => {
                 self.meeting_controls.update(message);
                 self.apply_controls();
 
-                if self.meeting_controls.camera_off {
-                    self.local_frame = None;
+                if self.meeting_controls.camera_off
+                    && let Some((identity, _)) = &self.local
+                {
+                    self.frames.remove(identity);
                 }
 
                 if !self.meeting_controls.chat_hidden {
@@ -226,6 +253,12 @@ impl MeetingRoomPage {
         }
 
         Task::none()
+    }
+
+    fn is_local(&self, identity: &str) -> bool {
+        self.local
+            .as_ref()
+            .is_some_and(|(local, _)| local == identity)
     }
 
     fn apply_controls(&self) {
@@ -349,6 +382,37 @@ fn participant_label(name: String, identity: String) -> String {
     if name.is_empty() { identity } else { name }
 }
 
+/// What the single (non-mosaic) view shows: a remote with video when there is
+/// one, otherwise our own preview. `tiles` is already sorted, so "first
+/// remote" is alphabetical.
+fn featured<'a>(tiles: &[Tile<'a>]) -> Option<(&'a str, &'a Frame)> {
+    let with_video = |local: bool| {
+        tiles
+            .iter()
+            .find(|tile| tile.is_local == local && tile.frame.is_some())
+    };
+
+    with_video(false)
+        .or_else(|| with_video(true))
+        .and_then(|tile| Some((tile.identity, tile.frame?)))
+}
+
+/// Tells the page who is here. Reads our own name from the room every time,
+/// so a local rename is picked up without tracking it separately.
+async fn send_participants(output: &mut Sender<MeetingRoomMessage>, room: &Room, roster: &Roster) {
+    let local = room.local_participant();
+
+    let _ = output
+        .send(MeetingRoomMessage::Participants {
+            local: (
+                local.identity().0,
+                participant_label(local.name(), local.identity().0),
+            ),
+            remote: roster.clone(),
+        })
+        .await;
+}
+
 /// Adapts `LiveKit`'s participant map into the shape the chat panel wants.
 fn roster_of(room: &Room) -> Roster {
     room.remote_participants()
@@ -371,10 +435,12 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
     let (url, token) = data.clone();
 
     // A small buffer plus LiveKit's own keep-newest frame queue means a slow UI
-    // drops stale frames at the source instead of accumulating latency. Two
-    // producers now share it — the camera and the remote track — so it needs a
-    // slot each, or `try_send` starves whichever one loses the race.
-    iced::stream::channel(4, async move |mut output| {
+    // drops stale frames at the source instead of accumulating latency. The
+    // camera and every remote track share it, and `try_send` drops a frame
+    // when it is full — that is the intended backpressure, not a bug. Every
+    // frame that does get through triggers a redraw, so the redraw rate grows
+    // with the head count; fine for a proof of concept.
+    iced::stream::channel(8, async move |mut output| {
         let connection = Room::connect(&url, &token, RoomOptions::default()).await;
 
         let (room, mut events) = match connection {
@@ -391,20 +457,22 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
 
         let _ = output.send(MeetingRoomMessage::Status(Status::Live)).await;
 
+        let local_identity = room.local_participant().identity().0;
+
         // Anyone already here when we arrived fires no `ParticipantConnected`,
         // so the roster has to start from a snapshot rather than from events.
         let mut roster = roster_of(&room);
-        let _ = output
-            .send(MeetingRoomMessage::MeetingChat(
-                MeetingChatMessage::ParticipantsChanged(roster.clone()),
-            ))
-            .await;
+        send_participants(&mut output, &room, &roster).await;
 
-        let mut videos: SelectAll<NativeVideoStream> = SelectAll::new();
+        // Each remote stream is tagged with its participant so the page can
+        // route the frame to the right tile.
+        let mut videos: SelectAll<BoxStream<'static, (String, BoxVideoFrame)>> = SelectAll::new();
         let mut audio: SelectAll<NativeAudioStream> = SelectAll::new();
         let mut frame_id: u64 = 0;
 
-        let mut remote_video: Option<TrackSid> = None;
+        // One video stream per remote participant. `SelectAll` cannot remove
+        // a stream by key, so each carries an abort handle instead.
+        let mut remote_videos: HashMap<String, (TrackSid, AbortHandle)> = HashMap::new();
 
         // Diagnostics: which of the two video directions is actually alive.
         let mut remote_frames: u64 = 0;
@@ -497,24 +565,58 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                     match event {
                         RoomEvent::TrackSubscribed {
                             track: RemoteTrack::Video(track),
-                            ..
-                        } if videos.is_empty() => {
-                            remote_video = Some(track.sid());
-                            videos.push(
-                                NativeVideoStream::new(track.rtc_track()),
-                            );
+                            publication,
+                            participant,
+                        } if publication.source() != TrackSource::Screenshare => {
+                            let identity = participant.identity().0;
+
+                            let (frames, abort) =
+                                stream::abortable(NativeVideoStream::new(track.rtc_track()));
+                            let tag = identity.clone();
+                            videos.push(frames.map(move |frame| (tag.clone(), frame)).boxed());
+
+                            // Latest wins: a reconnect can re-subscribe
+                            // without an unsubscribe for the old track.
+                            if let Some((_, previous)) =
+                                remote_videos.insert(identity, (track.sid(), abort))
+                            {
+                                previous.abort();
+                            }
                         }
                         RoomEvent::TrackUnsubscribed {
                             track: RemoteTrack::Video(track),
+                            participant,
                             ..
-                        } if remote_video.as_ref() == Some(&track.sid()) => {
-                            // The peer switched its camera off.
-                            videos.clear();
-                            remote_video = None;
-                            remote_frames = 0;
+                        } => {
+                            let identity = participant.identity().0;
 
+                            // A late unsubscribe for a track we already
+                            // replaced must not kill its replacement.
+                            let current = remote_videos
+                                .get(&identity)
+                                .is_some_and(|(sid, _)| *sid == track.sid());
+
+                            if current {
+                                if let Some((_, abort)) = remote_videos.remove(&identity) {
+                                    abort.abort();
+                                }
+
+                                let _ = output
+                                    .send(MeetingRoomMessage::VideoEnded(identity))
+                                    .await;
+                            }
+                        }
+                        RoomEvent::TrackMuted {
+                            participant: Participant::Remote(participant),
+                            publication,
+                        } if publication.kind() == TrackKind::Video => {
+                            // "Camera off" in the browser is a mute, not an
+                            // unpublish: the track stays subscribed and just
+                            // goes quiet, which would freeze the tile on its
+                            // last frame. Frames resume by themselves on
+                            // unmute.
                             let _ = output
-                                .send(MeetingRoomMessage::RemoteVideoEnded)
+                                .send(MeetingRoomMessage::VideoEnded(participant.identity().0))
                                 .await;
                         }
                         RoomEvent::TrackSubscribed {
@@ -549,11 +651,7 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                             // produced no events we could see, so trust the
                             // room over our accumulated roster.
                             roster = roster_of(&room);
-                            let _ = output
-                                .send(MeetingRoomMessage::MeetingChat(
-                                    MeetingChatMessage::ParticipantsChanged(roster.clone()),
-                                    ))
-                                .await;
+                            send_participants(&mut output, &room, &roster).await;
                         }
                         RoomEvent::ParticipantConnected(participant) => {
                             roster.insert(
@@ -564,38 +662,33 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                                 ),
                             );
 
-                            let _ = output
-                                .send(MeetingRoomMessage::MeetingChat(
-                                    MeetingChatMessage::ParticipantsChanged(roster.clone()),
-                                    ))
-                                .await;
+                            send_participants(&mut output, &room, &roster).await;
                         }
                         RoomEvent::ParticipantDisconnected(participant) => {
-                            roster.remove(&participant.identity().0);
+                            let identity = participant.identity().0;
+                            roster.remove(&identity);
 
-                            let _ = output
-                                .send(MeetingRoomMessage::MeetingChat(
-                                    MeetingChatMessage::ParticipantsChanged(roster.clone()),
-                                    ))
-                                .await;
+                            if let Some((_, abort)) = remote_videos.remove(&identity) {
+                                abort.abort();
+                            }
+
+                            send_participants(&mut output, &room, &roster).await;
                         }
                         RoomEvent::ParticipantNameChanged { participant, name, .. } => {
                             let identity = participant.identity().0;
 
-                            // Only ever tracks remotes; a rename on ourselves
-                            // must not add us to our own recipient list.
+                            // The roster only ever holds remotes — adding
+                            // ourselves would put us in our own recipient
+                            // list. Our own rename still reaches the page,
+                            // since `send_participants` reads it off the room.
                             if roster.contains_key(&identity) {
                                 roster.insert(
                                     identity.clone(),
                                     participant_label(name, identity),
                                 );
-
-                                let _ = output
-                                    .send(MeetingRoomMessage::MeetingChat(
-                                        MeetingChatMessage::ParticipantsChanged(roster.clone()),
-                                        ))
-                                    .await;
                             }
+
+                            send_participants(&mut output, &room, &roster).await;
                         }
                         RoomEvent::Disconnected { reason } => {
                             let _ = output
@@ -670,7 +763,7 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                     }
                 }
                 frame = videos.next() => {
-                    let Some(frame) = frame else { continue };
+                    let Some((identity, frame)) = frame else { continue };
 
                     let Some(buffer) = to_i420(&*frame.buffer) else {
                         eprintln!(
@@ -691,12 +784,10 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
 
                     frame_id = frame_id.wrapping_add(1);
 
-                    let _ = output
-                        .try_send(MeetingRoomMessage::Frame(Frame::new(
-                            Arc::new(buffer),
-                            frame_id,
-                            frame.rotation,
-                        )));
+                    let _ = output.try_send(MeetingRoomMessage::Frame {
+                        identity,
+                        frame: Frame::new(Arc::new(buffer), frame_id, frame.rotation),
+                    });
                 }
                 frame = audio.next() => {
                     let Some(frame) = frame else { continue };
@@ -726,15 +817,12 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                         }
                     }
 
-                    if remote_frames == 0 {
-                        frame_id = frame_id.wrapping_add(1);
+                    frame_id = frame_id.wrapping_add(1);
 
-                        let _ = output.try_send(MeetingRoomMessage::LocalFrame(Frame::new(
-                            buffer,
-                            frame_id,
-                            VideoRotation::VideoRotation0,
-                        )));
-                    }
+                    let _ = output.try_send(MeetingRoomMessage::Frame {
+                        identity: local_identity.clone(),
+                        frame: Frame::new(buffer, frame_id, VideoRotation::VideoRotation0),
+                    });
                 }
                 camera_wanted = camera_toggles.next() => {
                     let Some(camera_wanted) = camera_wanted else { continue };

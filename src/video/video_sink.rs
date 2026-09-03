@@ -60,14 +60,22 @@ pub fn to_i420(buffer: &dyn VideoBuffer) -> Option<I420Buffer> {
 }
 
 /// Draws a [`Frame`]. Emits no messages, so it is generic over `Message`.
+///
+/// `key` names the GPU textures this widget draws from. Every sink on screen
+/// at once needs its own — in practice the participant's identity — because
+/// the pipeline is shared between all of them.
 #[derive(Debug)]
 pub struct VideoSink {
+    key: String,
     frame: Frame,
 }
 
 impl VideoSink {
-    pub const fn new(frame: Frame) -> Self {
-        Self { frame }
+    pub fn new(key: impl Into<String>, frame: Frame) -> Self {
+        Self {
+            key: key.into(),
+            frame,
+        }
     }
 }
 
@@ -82,6 +90,7 @@ impl<Message> shader::Program<Message> for VideoSink {
         _bounds: Rectangle,
     ) -> Self::Primitive {
         VideoPrimitive {
+            key: self.key.clone(),
             buffer: Arc::clone(&self.frame.buffer),
             id: self.frame.id,
             rotation: quarter_turns(self.frame.rotation),
@@ -91,9 +100,23 @@ impl<Message> shader::Program<Message> for VideoSink {
 
 #[derive(Debug)]
 pub struct VideoPrimitive {
+    key: String,
     buffer: Arc<I420Buffer>,
     id: u64,
     rotation: u32,
+}
+
+/// One frame's worth of parameters for [`VideoPipeline::upload`].
+#[derive(Clone, Copy)]
+pub struct Upload<'a> {
+    /// Which tile's textures to fill.
+    pub key: &'a str,
+    pub buffer: &'a I420Buffer,
+    pub frame_id: u64,
+    /// Units of 90 degrees clockwise.
+    pub rotation: u32,
+    /// The widget rectangle in logical pixels.
+    pub bounds: Rectangle,
 }
 
 impl Primitive for VideoPrimitive {
@@ -120,13 +143,23 @@ impl Primitive for VideoPrimitive {
             return;
         }
 
-        pipeline.upload(device, queue, &self.buffer, self.id, self.rotation, *bounds);
+        pipeline.upload(
+            device,
+            queue,
+            Upload {
+                key: &self.key,
+                buffer: &self.buffer,
+                frame_id: self.id,
+                rotation: self.rotation,
+                bounds: *bounds,
+            },
+        );
     }
 
     fn draw(&self, pipeline: &Self::Pipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
         // Returning true reuses iced's render pass, whose viewport and scissor
         // are already set to our bounds — so `render` is never called.
-        pipeline.draw(render_pass)
+        pipeline.draw(&self.key, render_pass)
     }
 }
 

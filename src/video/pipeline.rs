@@ -1,10 +1,14 @@
-//! The wgpu half of video rendering: one render pipeline plus the three
-//! `R8Unorm` plane textures the I420 frame is uploaded into.
+//! The wgpu half of video rendering: one render pipeline plus, per on-screen
+//! tile, the three `R8Unorm` plane textures its I420 frame is uploaded into.
+
+use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
 use iced::wgpu;
 use iced::widget::shader::Pipeline;
 use livekit::webrtc::video_frame::{I420Buffer, VideoBuffer};
+
+use super::video_sink::Upload;
 
 /// Matches `Uniforms` in `yuv.wgsl`. Exactly 16 bytes, which is the alignment
 /// a WGSL uniform block needs, so no explicit padding is required.
@@ -33,15 +37,30 @@ struct Planes {
     v: wgpu::Texture,
 }
 
+/// GPU state for one video widget on screen.
+///
+/// iced keeps a single pipeline per primitive *type* and runs every
+/// primitive's `prepare` before any `draw`, so state shared across widgets
+/// would leave every tile showing whichever frame was uploaded last. Each
+/// widget therefore keys its own textures and uniforms.
+struct Tile {
+    planes: Planes,
+    /// Letterbox scale and rotation differ per tile, and the bind group
+    /// references the buffer, so it cannot be shared.
+    uniforms: wgpu::Buffer,
+    /// Id of the frame currently resident in the textures, so repeated redraws
+    /// of the same frame skip the upload.
+    uploaded: Option<u64>,
+    /// Touched by `prepare`; cleared by `trim`. A tile nobody prepared this
+    /// frame is gone from the screen and its textures can go.
+    used: bool,
+}
+
 pub struct VideoPipeline {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    uniforms: wgpu::Buffer,
-    planes: Option<Planes>,
-    /// Id of the frame currently resident in the textures, so repeated redraws
-    /// of the same frame skip the upload.
-    uploaded: Option<u64>,
+    tiles: HashMap<String, Tile>,
     srgb: bool,
 }
 
@@ -128,61 +147,80 @@ impl Pipeline for VideoPipeline {
             ..Default::default()
         });
 
-        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("video.yuv.uniforms"),
-            size: UNIFORM_SIZE,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         Self {
             pipeline,
             layout,
             sampler,
-            uniforms,
-            planes: None,
-            uploaded: None,
+            tiles: HashMap::new(),
             srgb: format.is_srgb(),
         }
+    }
+
+    /// Runs once after every rendered frame. Anything not prepared since the
+    /// last trim is off screen — a participant who left, or every tile when
+    /// the mosaic is switched off — so its textures are released here.
+    fn trim(&mut self) {
+        self.tiles
+            .retain(|_, tile| std::mem::replace(&mut tile.used, false));
     }
 }
 
 impl VideoPipeline {
-    /// Uploads `buffer` and refreshes the uniforms.
-    ///
-    /// `bounds` is the widget rectangle in logical pixels; `rotation` is in
-    /// units of 90 degrees clockwise.
-    pub fn upload(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        buffer: &I420Buffer,
-        frame_id: u64,
-        rotation: u32,
-        bounds: iced::Rectangle,
-    ) {
+    /// Uploads the frame into its tile and refreshes that tile's uniforms.
+    pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, upload: Upload<'_>) {
+        let Upload {
+            key,
+            buffer,
+            frame_id,
+            rotation,
+            bounds,
+        } = upload;
         let size = (buffer.width(), buffer.height());
 
-        if self.planes.as_ref().map(|planes| planes.size) != Some(size) {
-            self.planes = Some(self.allocate(device, size, buffer));
-            // Sizes changed, so whatever was resident is gone.
-            self.uploaded = None;
+        if !self.tiles.contains_key(key) {
+            let uniforms = create_uniforms(device);
+            let planes = allocate(device, &self.layout, &self.sampler, &uniforms, size, buffer);
+
+            self.tiles.insert(
+                key.to_owned(),
+                Tile {
+                    planes,
+                    uniforms,
+                    uploaded: None,
+                    used: false,
+                },
+            );
         }
 
-        let Some(planes) = self.planes.as_ref() else {
+        let Some(tile) = self.tiles.get_mut(key) else {
             return;
         };
 
-        if self.uploaded != Some(frame_id) {
+        tile.used = true;
+
+        if tile.planes.size != size {
+            tile.planes = allocate(
+                device,
+                &self.layout,
+                &self.sampler,
+                &tile.uniforms,
+                size,
+                buffer,
+            );
+            // Sizes changed, so whatever was resident is gone.
+            tile.uploaded = None;
+        }
+
+        if tile.uploaded != Some(frame_id) {
             let (data_y, data_u, data_v) = buffer.data();
             let (stride_y, stride_u, stride_v) = buffer.strides();
             let chroma = (buffer.chroma_width(), buffer.chroma_height());
 
-            write_plane(queue, &planes.y, data_y, stride_y, size);
-            write_plane(queue, &planes.u, data_u, stride_u, chroma);
-            write_plane(queue, &planes.v, data_v, stride_v, chroma);
+            write_plane(queue, &tile.planes.y, data_y, stride_y, size);
+            write_plane(queue, &tile.planes.u, data_u, stride_u, chroma);
+            write_plane(queue, &tile.planes.v, data_v, stride_v, chroma);
 
-            self.uploaded = Some(frame_id);
+            tile.uploaded = Some(frame_id);
         }
 
         // A quarter turn shows the frame's height across the widget's width.
@@ -193,7 +231,7 @@ impl VideoPipeline {
         };
 
         queue.write_buffer(
-            &self.uniforms,
+            &tile.uniforms,
             0,
             bytemuck::bytes_of(&Uniforms {
                 scale: letterbox(bounds, displayed),
@@ -203,62 +241,80 @@ impl VideoPipeline {
         );
     }
 
-    pub fn draw(&self, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
-        let Some(planes) = self.planes.as_ref() else {
+    /// Draws `key`'s tile. `false` when nothing was uploaded for it, which
+    /// `prepare` allows for degenerate bounds or an empty buffer.
+    pub fn draw(&self, key: &str, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
+        let Some(tile) = self.tiles.get(key) else {
             return false;
         };
 
         render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &planes.bind_group, &[]);
+        render_pass.set_bind_group(0, &tile.planes.bind_group, &[]);
         render_pass.draw(0..3, 0..1);
 
         true
     }
+}
 
-    fn allocate(&self, device: &wgpu::Device, size: (u32, u32), buffer: &I420Buffer) -> Planes {
-        let chroma = (buffer.chroma_width(), buffer.chroma_height());
+fn create_uniforms(device: &wgpu::Device) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("video.yuv.uniforms"),
+        size: UNIFORM_SIZE,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
 
-        let y = create_plane(device, "video.yuv.plane.y", size);
-        let u = create_plane(device, "video.yuv.plane.u", chroma);
-        let v = create_plane(device, "video.yuv.plane.v", chroma);
+fn allocate(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    uniforms: &wgpu::Buffer,
+    size: (u32, u32),
+    buffer: &I420Buffer,
+) -> Planes {
+    let chroma = (buffer.chroma_width(), buffer.chroma_height());
 
-        let view =
-            |texture: &wgpu::Texture| texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let y = create_plane(device, "video.yuv.plane.y", size);
+    let u = create_plane(device, "video.yuv.plane.u", chroma);
+    let v = create_plane(device, "video.yuv.plane.v", chroma);
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("video.yuv.bind_group"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view(&y)),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&view(&u)),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&view(&v)),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: self.uniforms.as_entire_binding(),
-                },
-            ],
-        });
+    let view =
+        |texture: &wgpu::Texture| texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        Planes {
-            size,
-            bind_group,
-            y,
-            u,
-            v,
-        }
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("video.yuv.bind_group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view(&y)),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&view(&u)),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&view(&v)),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: uniforms.as_entire_binding(),
+            },
+        ],
+    });
+
+    Planes {
+        size,
+        bind_group,
+        y,
+        u,
+        v,
     }
 }
 
