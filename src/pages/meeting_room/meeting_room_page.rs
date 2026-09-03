@@ -34,14 +34,15 @@ use tokio::time::MissedTickBehavior;
 
 use super::chat_notification::{ChatNotification, ChatNotificationAction, ChatNotificationMessage};
 use super::data::{EVERYONE_ID, Recipient, Roster};
+use super::featured_view;
 use super::meeting_chat::{
     ChatEntry, ChatRequest, MeetingChat, MeetingChatAction, MeetingChatMessage,
 };
 use super::meeting_controls::{MeetingControls, MeetingControlsMessage};
-use super::mosaic::{self, Tile};
+use super::mosaic_view;
 use crate::audio::audio_sink::AudioSink;
 use crate::audio::audio_source::AudioSource;
-use crate::video::video_sink::{Frame, VideoSink, to_i420};
+use crate::video::video_sink::{Frame, to_i420};
 use crate::video::video_source::VideoSource;
 
 /// The chat protocol `OpenVidu` Meet speaks: a reliable data packet on this
@@ -131,17 +132,14 @@ impl MeetingRoomPage {
     }
 
     pub fn view(&self) -> Element<'_, MeetingRoomMessage> {
-        let tiles = mosaic::ordered_tiles(self.local.as_ref(), &self.roster, &self.frames);
+        let tiles = mosaic_view::ordered_tiles(self.local.as_ref(), &self.roster, &self.frames);
 
         let content: Element<'_, MeetingRoomMessage> = if self.status.is_error() {
             text(self.status.label()).style(text::danger).into()
         } else if self.meeting_controls.mosaic_on && !tiles.is_empty() {
-            mosaic::view(tiles)
-        } else if let Some((identity, frame)) = featured(&tiles) {
-            shader(VideoSink::new(identity, frame.clone()))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
+            mosaic_view::view(tiles)
+        } else if let Some(single) = featured_view::view(&tiles) {
+            single
         } else {
             text(self.status.label()).into()
         };
@@ -380,21 +378,6 @@ fn camera_toggles(receiver: watch::Receiver<bool>) -> impl Stream<Item = bool> +
 
 fn participant_label(name: String, identity: String) -> String {
     if name.is_empty() { identity } else { name }
-}
-
-/// What the single (non-mosaic) view shows: a remote with video when there is
-/// one, otherwise our own preview. `tiles` is already sorted, so "first
-/// remote" is alphabetical.
-fn featured<'a>(tiles: &[Tile<'a>]) -> Option<(&'a str, &'a Frame)> {
-    let with_video = |local: bool| {
-        tiles
-            .iter()
-            .find(|tile| tile.is_local == local && tile.frame.is_some())
-    };
-
-    with_video(false)
-        .or_else(|| with_video(true))
-        .and_then(|tile| Some((tile.identity, tile.frame?)))
 }
 
 /// Tells the page who is here. Reads our own name from the room every time,
