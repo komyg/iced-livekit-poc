@@ -7,7 +7,7 @@ use iced::futures::{
     FutureExt, SinkExt, Stream, StreamExt, select, stream, stream::FuturesUnordered,
     stream::SelectAll,
 };
-use iced::widget::{container, row, shader, stack, text};
+use iced::widget::{container, row, stack, text};
 use iced::{Element, Length, Subscription, Task, padding};
 use livekit::id::{ParticipantIdentity, TrackSid};
 use livekit::options::TrackPublishOptions;
@@ -33,7 +33,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
 
 use super::chat_notification::{ChatNotification, ChatNotificationAction, ChatNotificationMessage};
-use super::data::{EVERYONE_ID, Recipient, Roster};
+use super::data::{EVERYONE_ID, Member, Recipient, Roster, participant_label};
 use super::featured_view;
 use super::meeting_chat::{
     ChatEntry, ChatRequest, MeetingChat, MeetingChatAction, MeetingChatMessage,
@@ -78,15 +78,9 @@ impl Status {
 #[derive(Debug, Clone)]
 pub enum MeetingRoomMessage {
     Status(Status),
-    Frame {
-        identity: String,
-        frame: Frame,
-    },
+    Frame { identity: String, frame: Frame },
     VideoEnded(String),
-    Participants {
-        local: (String, String),
-        remote: Roster,
-    },
+    Participants(Roster),
     MeetingControls(MeetingControlsMessage),
     MeetingChat(MeetingChatMessage),
     ChatNotification(ChatNotificationMessage),
@@ -100,8 +94,7 @@ pub struct MeetingRoomPage {
     token: String,
     url: String,
     status: Status,
-    /// Our own (identity, label); `None` until the room loop reports in.
-    local: Option<(String, String)>,
+    /// Empty until the room loop reports in.
     roster: Roster,
     /// Latest frame per participant identity, ours included.
     frames: HashMap<String, Frame>,
@@ -119,7 +112,6 @@ impl MeetingRoomPage {
             token,
             url,
             status: Status::Connecting,
-            local: None,
             roster: Roster::new(),
             frames: HashMap::new(),
             meeting_controls: MeetingControls::new(),
@@ -132,7 +124,7 @@ impl MeetingRoomPage {
     }
 
     pub fn view(&self) -> Element<'_, MeetingRoomMessage> {
-        let tiles = mosaic_view::ordered_tiles(self.local.as_ref(), &self.roster, &self.frames);
+        let tiles = mosaic_view::ordered_tiles(&self.roster, &self.frames);
 
         let content: Element<'_, MeetingRoomMessage> = if self.status.is_error() {
             text(self.status.label()).style(text::danger).into()
@@ -180,7 +172,7 @@ impl MeetingRoomPage {
             MeetingRoomMessage::Frame { identity, frame } => {
                 // A frame already in flight when the camera was switched off
                 // must not resurrect our tile.
-                let ours = self.is_local(&identity);
+                let ours = self.roster.is_local(&identity);
                 if !(ours && self.meeting_controls.camera_off) {
                     self.frames.insert(identity, frame);
                 }
@@ -188,22 +180,20 @@ impl MeetingRoomPage {
             MeetingRoomMessage::VideoEnded(identity) => {
                 self.frames.remove(&identity);
             }
-            MeetingRoomMessage::Participants { local, remote } => {
-                self.frames
-                    .retain(|identity, _| *identity == local.0 || remote.contains_key(identity));
-                self.local = Some(local);
+            MeetingRoomMessage::Participants(roster) => {
+                self.frames.retain(|identity, _| roster.contains(identity));
                 self.meeting_chat
-                    .update(MeetingChatMessage::ParticipantsChanged(remote.clone()));
-                self.roster = remote;
+                    .update(MeetingChatMessage::ParticipantsChanged(roster.clone()));
+                self.roster = roster;
             }
             MeetingRoomMessage::MeetingControls(message) => {
                 self.meeting_controls.update(message);
                 self.apply_controls();
 
                 if self.meeting_controls.camera_off
-                    && let Some((identity, _)) = &self.local
+                    && let Some(local) = self.roster.local()
                 {
-                    self.frames.remove(identity);
+                    self.frames.remove(&local.identity);
                 }
 
                 if !self.meeting_controls.chat_hidden {
@@ -251,12 +241,6 @@ impl MeetingRoomPage {
         }
 
         Task::none()
-    }
-
-    fn is_local(&self, identity: &str) -> bool {
-        self.local
-            .as_ref()
-            .is_some_and(|(local, _)| local == identity)
     }
 
     fn apply_controls(&self) {
@@ -376,37 +360,11 @@ fn camera_toggles(receiver: watch::Receiver<bool>) -> impl Stream<Item = bool> +
     })
 }
 
-fn participant_label(name: String, identity: String) -> String {
-    if name.is_empty() { identity } else { name }
-}
-
-/// Tells the page who is here. Reads our own name from the room every time,
-/// so a local rename is picked up without tracking it separately.
-async fn send_participants(output: &mut Sender<MeetingRoomMessage>, room: &Room, roster: &Roster) {
-    let local = room.local_participant();
-
+/// Tells the page who is here.
+async fn send_participants(output: &mut Sender<MeetingRoomMessage>, roster: &Roster) {
     let _ = output
-        .send(MeetingRoomMessage::Participants {
-            local: (
-                local.identity().0,
-                participant_label(local.name(), local.identity().0),
-            ),
-            remote: roster.clone(),
-        })
+        .send(MeetingRoomMessage::Participants(roster.clone()))
         .await;
-}
-
-/// Adapts `LiveKit`'s participant map into the shape the chat panel wants.
-fn roster_of(room: &Room) -> Roster {
-    room.remote_participants()
-        .into_iter()
-        .map(|(identity, participant)| {
-            (
-                identity.0,
-                participant_label(participant.name(), participant.identity().0),
-            )
-        })
-        .collect()
 }
 
 #[expect(
@@ -444,8 +402,8 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
 
         // Anyone already here when we arrived fires no `ParticipantConnected`,
         // so the roster has to start from a snapshot rather than from events.
-        let mut roster = roster_of(&room);
-        send_participants(&mut output, &room, &roster).await;
+        let mut roster = Roster::snapshot(&room);
+        send_participants(&mut output, &roster).await;
 
         // Each remote stream is tagged with its participant so the page can
         // route the frame to the right tile.
@@ -633,19 +591,16 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                             // Joins and leaves that happened while we were down
                             // produced no events we could see, so trust the
                             // room over our accumulated roster.
-                            roster = roster_of(&room);
-                            send_participants(&mut output, &room, &roster).await;
+                            roster = Roster::snapshot(&room);
+                            send_participants(&mut output, &roster).await;
                         }
                         RoomEvent::ParticipantConnected(participant) => {
-                            roster.insert(
+                            roster.upsert(Member::new(
+                                participant.name(),
                                 participant.identity().0,
-                                participant_label(
-                                    participant.name(),
-                                    participant.identity().0,
-                                ),
-                            );
+                            ));
 
-                            send_participants(&mut output, &room, &roster).await;
+                            send_participants(&mut output, &roster).await;
                         }
                         RoomEvent::ParticipantDisconnected(participant) => {
                             let identity = participant.identity().0;
@@ -655,23 +610,18 @@ fn connect(data: &(String, String)) -> impl Stream<Item = MeetingRoomMessage> + 
                                 abort.abort();
                             }
 
-                            send_participants(&mut output, &room, &roster).await;
+                            send_participants(&mut output, &roster).await;
                         }
                         RoomEvent::ParticipantNameChanged { participant, name, .. } => {
                             let identity = participant.identity().0;
 
-                            // The roster only ever holds remotes — adding
-                            // ourselves would put us in our own recipient
-                            // list. Our own rename still reaches the page,
-                            // since `send_participants` reads it off the room.
-                            if roster.contains_key(&identity) {
-                                roster.insert(
-                                    identity.clone(),
-                                    participant_label(name, identity),
-                                );
+                            // Guarded so a rename for someone we never saw
+                            // join cannot add them as a remote.
+                            if roster.contains(&identity) {
+                                roster.upsert(Member::new(name, identity));
                             }
 
-                            send_participants(&mut output, &room, &roster).await;
+                            send_participants(&mut output, &roster).await;
                         }
                         RoomEvent::Disconnected { reason } => {
                             let _ = output

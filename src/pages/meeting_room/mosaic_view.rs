@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use iced::widget::{column, container, responsive, row, shader, space, stack, text};
 use iced::{Background, Color, Element, Length, Size, border};
 
-use super::data::Roster;
+use super::data::{Member, Roster};
 use crate::video::video_sink::{Frame, VideoSink};
 
 pub const MAX_TILES: usize = 32;
@@ -16,26 +16,19 @@ pub struct Tile<'a> {
     pub is_local: bool,
 }
 
-pub fn ordered_tiles<'a>(
-    local: Option<&'a (String, String)>,
-    roster: &'a Roster,
-    frames: &'a HashMap<String, Frame>,
-) -> Vec<Tile<'a>> {
-    let tile = |identity: &'a String, label: &'a String, is_local: bool| Tile {
-        identity,
-        label,
-        frame: frames.get(identity),
+pub fn ordered_tiles<'a>(roster: &'a Roster, frames: &'a HashMap<String, Frame>) -> Vec<Tile<'a>> {
+    let tile = |member: &'a Member, is_local: bool| Tile {
+        identity: &member.identity,
+        label: &member.label,
+        frame: frames.get(&member.identity),
         is_local,
     };
 
-    let mut tiles: Vec<Tile<'a>> = local
-        .iter()
-        .map(|(identity, label)| tile(identity, label, true))
-        .chain(
-            roster
-                .iter()
-                .map(|(identity, label)| tile(identity, label, false)),
-        )
+    let mut tiles: Vec<Tile<'a>> = roster
+        .local()
+        .map(|member| tile(member, true))
+        .into_iter()
+        .chain(roster.remotes().map(|member| tile(member, false)))
         .collect();
 
     tiles.sort_by_cached_key(|tile| (tile.label.to_lowercase(), tile.identity.to_owned()));
@@ -183,17 +176,20 @@ mod tests {
 
     #[test]
     fn tiles_sort_by_name_then_identity_and_include_local() {
-        let local = ("id-local".to_owned(), "bob".to_owned());
-        let roster: Roster = [
-            ("id-2".to_owned(), "alice".to_owned()),
-            ("id-1".to_owned(), "Alice".to_owned()),
-            ("id-3".to_owned(), "Zed".to_owned()),
-        ]
-        .into_iter()
-        .collect();
+        let mut roster: Roster = [("id-2", "alice"), ("id-1", "Alice"), ("id-3", "Zed")]
+            .into_iter()
+            .map(|(identity, label)| Member {
+                identity: identity.to_owned(),
+                label: label.to_owned(),
+            })
+            .collect();
+        roster.set_local(Member {
+            identity: "id-local".to_owned(),
+            label: "bob".to_owned(),
+        });
         let frames = HashMap::new();
 
-        let tiles = ordered_tiles(Some(&local), &roster, &frames);
+        let tiles = ordered_tiles(&roster, &frames);
         let identities: Vec<&str> = tiles.iter().map(|tile| tile.identity).collect();
 
         assert_eq!(identities, ["id-1", "id-2", "id-local", "id-3"]);
@@ -203,11 +199,14 @@ mod tests {
     #[test]
     fn tiles_are_capped_after_sorting() {
         let roster: Roster = (0..40)
-            .map(|n| (format!("id-{n:02}"), format!("name-{n:02}")))
+            .map(|n| Member {
+                identity: format!("id-{n:02}"),
+                label: format!("name-{n:02}"),
+            })
             .collect();
         let frames = HashMap::new();
 
-        let tiles = ordered_tiles(None, &roster, &frames);
+        let tiles = ordered_tiles(&roster, &frames);
 
         assert_eq!(tiles.len(), MAX_TILES);
         assert_eq!(tiles.first().map(|tile| tile.identity), Some("id-00"));

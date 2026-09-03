@@ -169,22 +169,23 @@ impl MeetingChat {
 
 fn recipients_of(roster: &Roster) -> Vec<Recipient> {
     let mut duplicates: HashMap<&str, usize> = HashMap::new();
-    for label in roster.values() {
-        *duplicates.entry(label.as_str()).or_default() += 1;
+    for member in roster.remotes() {
+        *duplicates.entry(member.label.as_str()).or_default() += 1;
     }
 
+    // Remotes only: we cannot message ourselves.
     let mut recipients: Vec<Recipient> = roster
-        .iter()
-        .filter(|(identity, _)| *identity != EVERYONE_ID)
-        .map(|(identity, label)| Recipient {
-            id: identity.clone(),
+        .remotes()
+        .filter(|member| member.identity != EVERYONE_ID)
+        .map(|member| Recipient {
+            id: member.identity.clone(),
             label: if duplicates
-                .get(label.as_str())
+                .get(member.label.as_str())
                 .is_some_and(|count| *count > 1)
             {
-                format!("{label} ({identity})")
+                format!("{} ({})", member.label, member.identity)
             } else {
-                label.clone()
+                member.label.clone()
             },
         })
         .collect();
