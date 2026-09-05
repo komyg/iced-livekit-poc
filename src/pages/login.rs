@@ -3,6 +3,7 @@ use iced::{
     widget::{button, column, container, row, text, text_input},
 };
 use livekit_api::access_token::{AccessToken, VideoGrants};
+use rust_i18n::t;
 
 use crate::common::ApiKey;
 
@@ -77,11 +78,14 @@ impl LoginPage {
                 .into()
         }))
         .push(
-            container(button("Connect").on_press(LoginPageMessage::ConnectButtonPressed))
-                .padding(20)
-                .height(Length::Fill)
-                .width(Length::Fill)
-                .align_right(Length::Fill),
+            container(
+                button(text(t!("login.connect_btn")))
+                    .on_press(LoginPageMessage::ConnectButtonPressed),
+            )
+            .padding(20)
+            .height(Length::Fill)
+            .width(Length::Fill)
+            .align_right(Length::Fill),
         )
         .into()
     }

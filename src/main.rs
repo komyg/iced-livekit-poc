@@ -1,3 +1,6 @@
+#[macro_use]
+extern crate rust_i18n;
+
 mod audio;
 mod common;
 mod pages;
@@ -9,6 +12,8 @@ use pages::meeting_room::MeetingRoomPage;
 
 use crate::pages::login::{LoginPageAction, LoginPageMessage};
 use crate::pages::meeting_room::MeetingRoomMessage;
+
+i18n!("locales", fallback = "en");
 
 #[expect(
     clippy::large_enum_variant,
