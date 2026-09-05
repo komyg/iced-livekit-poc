@@ -86,6 +86,10 @@ pub fn main() -> iced::Result {
     // dropped-frame warnings and iced's adapter/surface-format selection.
     env_logger::init();
 
+    // Before the first screen is built: `Recipient::everyone` and the other
+    // labels resolve their text once, at construction.
+    common::set_locale_from_env();
+
     iced::application(Screen::new, update, view)
         .subscription(subscription)
         .title("PV Meet Connector")

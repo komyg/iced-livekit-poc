@@ -28,6 +28,7 @@ use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
 use livekit::webrtc::video_stream::native::NativeVideoStream;
 use livekit::{DataPacket, Room, RoomEvent, RoomOptions};
+use rust_i18n::t;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
@@ -62,10 +63,10 @@ pub enum Status {
 impl Status {
     fn label(&self) -> String {
         match self {
-            Self::Connecting => "Connecting…".to_owned(),
-            Self::Live => "Waiting for someone to publish video…".to_owned(),
-            Self::Reconnecting => "Reconnecting…".to_owned(),
-            Self::Ended(None) => "Disconnected.".to_owned(),
+            Self::Connecting => t!("meeting.status.connecting").into_owned(),
+            Self::Live => t!("meeting.status.waiting_for_video").into_owned(),
+            Self::Reconnecting => t!("meeting.status.reconnecting").into_owned(),
+            Self::Ended(None) => t!("meeting.status.disconnected").into_owned(),
             Self::Ended(Some(error)) => error.clone(),
         }
     }

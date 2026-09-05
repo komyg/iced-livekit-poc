@@ -1,0 +1,20 @@
+_version: 1
+login:
+  api_key: "Clave de API"
+  api_secret: "Secreto de API"
+  api_url: "URL de la API"
+  username: "Nombre de usuario"
+  room_id: "ID de sala"
+  connect_btn: "Conectar"
+chat:
+  everyone: "Enviar a todos"
+  message: "Mensaje"
+  entry_header: "%{sender} → %{recipient}: "
+meeting:
+  status:
+    connecting: "Conectando…"
+    waiting_for_video: "Esperando a que alguien publique vídeo…"
+    reconnecting: "Reconectando…"
+    disconnected: "Desconectado."
+  tile:
+    local_label: "%{name} (tú)"

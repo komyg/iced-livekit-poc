@@ -3,6 +3,7 @@
 use std::fmt;
 
 use livekit::Room;
+use rust_i18n::t;
 
 /// Stands in for a participant identity on a message addressed to the room.
 /// No real identity can collide with it, so it doubles as the "everyone"
@@ -153,7 +154,7 @@ impl Recipient {
     pub fn everyone() -> Self {
         Self {
             id: EVERYONE_ID.to_owned(),
-            label: "Send to Everyone".to_owned(),
+            label: t!("chat.everyone").into_owned(),
         }
     }
 

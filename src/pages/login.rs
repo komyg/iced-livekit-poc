@@ -1,6 +1,6 @@
 use iced::{
     Element, Length,
-    widget::{button, column, container, row, text, text_input},
+    widget::{TextInput, button, column, container, row, text, text_input},
 };
 use livekit_api::access_token::{AccessToken, VideoGrants};
 use rust_i18n::t;
@@ -46,25 +46,44 @@ impl LoginPage {
         }
     }
 
-    pub fn view(&self) -> Element<'_, LoginPageMessage> {
+    pub fn view<'a>(&'a self) -> Element<'a, LoginPageMessage> {
+        let field = |label_key: &str, input: TextInput<'a, LoginPageMessage>| {
+            column![text(t!(label_key).into_owned()).size(14), input].spacing(4)
+        };
+
         column![
             row![
                 column![
-                    text_input("Api Key", &self.api_key)
-                        .on_input(LoginPageMessage::APIKeyContentChanged),
-                    text_input("Api Secret", &self.api_secret)
-                        .on_input(LoginPageMessage::APISecretContentChanged)
-                        .secure(true),
-                    text_input("Api URL", &self.api_url)
-                        .on_input(LoginPageMessage::APIURLContentChanged),
+                    field(
+                        "login.api_key",
+                        text_input("", &self.api_key)
+                            .on_input(LoginPageMessage::APIKeyContentChanged),
+                    ),
+                    field(
+                        "login.api_secret",
+                        text_input("", &self.api_secret)
+                            .on_input(LoginPageMessage::APISecretContentChanged)
+                            .secure(true),
+                    ),
+                    field(
+                        "login.api_url",
+                        text_input("", &self.api_url)
+                            .on_input(LoginPageMessage::APIURLContentChanged),
+                    ),
                 ]
                 .spacing(10)
                 .padding(20),
                 column![
-                    text_input("Username", &self.username)
-                        .on_input(LoginPageMessage::UsernameContentChanged),
-                    text_input("Room ID", &self.room_id)
-                        .on_input(LoginPageMessage::RoomIDContentChanged),
+                    field(
+                        "login.username",
+                        text_input("", &self.username)
+                            .on_input(LoginPageMessage::UsernameContentChanged),
+                    ),
+                    field(
+                        "login.room_id",
+                        text_input("", &self.room_id)
+                            .on_input(LoginPageMessage::RoomIDContentChanged),
+                    ),
                 ]
                 .spacing(10)
                 .padding(20),

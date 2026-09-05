@@ -2,6 +2,7 @@ use iced::widget::{
     button, column, combo_box, container, rich_text, row, scrollable, span, svg, text_input,
 };
 use iced::{Background, Center, Color, Element, Font, Length, border, font, never};
+use rust_i18n::t;
 use std::collections::HashMap;
 
 use super::data::{EVERYONE_ID, Recipient, Roster};
@@ -17,7 +18,12 @@ pub struct ChatEntry {
 
 impl ChatEntry {
     pub fn header(&self) -> String {
-        format!("{} → {}: ", self.sender, self.recipient.label)
+        t!(
+            "chat.entry_header",
+            sender = self.sender,
+            recipient = self.recipient.label
+        )
+        .into_owned()
     }
 }
 
@@ -97,7 +103,7 @@ impl MeetingChat {
 
         let recipient_picker = combo_box(
             &self.recipients,
-            "Send to Everyone",
+            &t!("chat.everyone"),
             Some(&self.recipient),
             MeetingChatMessage::RecipientSelected,
         )
@@ -106,7 +112,7 @@ impl MeetingChat {
         let message_composer = column![
             recipient_picker,
             row![
-                text_input("Message", &self.draft)
+                text_input(&t!("chat.message"), &self.draft)
                     .on_input(MeetingChatMessage::DraftChanged)
                     .on_submit_maybe(can_send.then_some(MeetingChatMessage::Send))
                     .width(Length::Fill),

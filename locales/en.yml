@@ -1,3 +1,20 @@
 _version: 1
 login:
+  api_key: "Api Key"
+  api_secret: "Api Secret"
+  api_url: "Api URL"
+  username: "Username"
+  room_id: "Room ID"
   connect_btn: "Connect"
+chat:
+  everyone: "Send to Everyone"
+  message: "Message"
+  entry_header: "%{sender} → %{recipient}: "
+meeting:
+  status:
+    connecting: "Connecting…"
+    waiting_for_video: "Waiting for someone to publish video…"
+    reconnecting: "Reconnecting…"
+    disconnected: "Disconnected."
+  tile:
+    local_label: "%{name} (you)"

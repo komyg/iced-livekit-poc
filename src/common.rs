@@ -1,5 +1,20 @@
 use dotenvy::dotenv;
+use rust_i18n::available_locales;
 use std::env::var;
+
+/// Switches the UI to the language `LANG` names — a bare `en`, `es`, `it` or
+/// `pt`, not a POSIX tag. Anything unknown leaves the `i18n!` fallback in
+/// place.
+pub fn set_locale_from_env() {
+    let Ok(language) = var("LANG") else {
+        return;
+    };
+    let language = language.trim().to_lowercase();
+
+    if available_locales!().iter().any(|known| *known == language) {
+        rust_i18n::set_locale(&language);
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 #[allow(clippy::struct_field_names)]

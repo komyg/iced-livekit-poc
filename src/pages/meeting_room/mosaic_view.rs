@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use iced::widget::{column, container, responsive, row, shader, space, stack, text};
 use iced::{Background, Color, Element, Length, Size, border};
+use rust_i18n::t;
 
 use super::data::{Member, Roster};
 use crate::video::video_sink::{Frame, VideoSink};
@@ -100,7 +101,7 @@ fn tile_view<'a, Message: 'a>(tile: Tile<'a>) -> Element<'a, Message> {
     };
 
     let name = if tile.is_local {
-        format!("{} (you)", tile.label)
+        t!("meeting.tile.local_label", name = tile.label).into_owned()
     } else {
         tile.label.to_owned()
     };
